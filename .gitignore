@@ -1,0 +1,7 @@
+node_modules/
+lib/
+*.log
+.env
+.credentials.json
+coverage/
+.vitest/

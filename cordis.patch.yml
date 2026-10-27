@@ -1,0 +1,19 @@
+# @ruqinhu/dsh-weixin-link bundle patch.
+#
+# `name` is the package name exactly as resolvable from the profile, matching how
+# the official bundles address their rows. A bare `weixin-link` would not resolve.
+#
+# The token is not configured here: it lives in the DSH credential store and is
+# referenced by environment-variable name, so this file never carries a secret.
+- insert:
+    - id: weixin-link
+      name: '@ruqinhu/dsh-weixin-link'
+      config:
+        tokenEnv: WEIXIN_BOT_TOKEN
+        accountIdEnv: WEIXIN_BOT_ACCOUNT_ID
+        baseUrl: 'https://ilinkai.weixin.qq.com'
+        dataDir: '~/.dsh/weixin-link'
+        poll: true
+        pollTimeoutMs: 40000
+        defaultUserId: ''
+        echoOwnMessages: false
