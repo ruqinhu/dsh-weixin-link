@@ -24,7 +24,14 @@ import type { IlinkErrorCode } from '../ilink/errors.js'
  *
  *   NEEDS_INBOUND — the owner sends a message, and a fresh context token arrives
  *   RATE_LIMITED  — the limit expires
- *   UNKNOWN       — covers `ret:-2 prepare failed`, which clears by itself
+ *   UNKNOWN       — a failure we could not classify; treated as transient because
+ *                   a code this version does not know is far more likely to be a
+ *                   new transient fault than proof of permanent unsendability
+ *
+ * Note that `ret:-2 prepare failed` is NOT an UNKNOWN here: it is classified
+ * NEEDS_INBOUND, because the token it is complaining about can only be refreshed by
+ * an inbound message. An earlier version of this comment said otherwise, which is
+ * what made the inversion above look reasonable at the time.
  *
  * When a genuinely permanent failure appears, add it here. Until then the default
  * is to keep the message, because retrying costs a little traffic and deleting

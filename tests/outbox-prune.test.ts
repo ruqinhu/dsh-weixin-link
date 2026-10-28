@@ -71,6 +71,16 @@ describe('Outbox.pruneSent', () => {
     expect(await readdir(join(dir, 'sent'))).toContain('not-ours.json')
   })
 
+  it('leaves a dashless numeric name alone rather than reading its tail as a stamp', async () => {
+    const { outbox, dir } = await makeOutbox()
+    await outbox.park({ toUserId: 'u', text: 'x', reason: 'X' })
+    // `indexOf('-')` is -1 here, so a naive `slice(0, -1)` would read `12345.jso`
+    // and parse 12345 — a tiny stamp that looks ancient and gets deleted.
+    await writeFile(join(dir, 'sent', '12345.json'), '{}', 'utf8')
+    expect(await outbox.pruneSent(0)).toBe(0)
+    expect(await readdir(join(dir, 'sent'))).toContain('12345.json')
+  })
+
   it('is a no-op when sent/ does not exist yet', async () => {
     const { outbox } = await makeOutbox()
     expect(await outbox.pruneSent(1_000)).toBe(0)

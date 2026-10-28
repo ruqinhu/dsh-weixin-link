@@ -134,7 +134,12 @@ export class Outbox {
     let removed = 0
     for (const name of names) {
       if (!name.endsWith('.json')) continue
-      const stamp = Number.parseInt(name.slice(0, name.indexOf('-')), 10)
+      // `indexOf('-')` is -1 for a name like `123.json`, and `slice(0, -1)` then
+      // yields a plausible-looking stamp — so a strict "leave unknown names alone"
+      // rule silently deletes them. Require the separator explicitly.
+      const dash = name.indexOf('-')
+      if (dash <= 0) continue
+      const stamp = Number.parseInt(name.slice(0, dash), 10)
       // Unexpected names are left alone: they are not ours, and guessing would risk
       // deleting a file whose age we cannot establish.
       if (!Number.isFinite(stamp) || stamp >= cutoff) continue
