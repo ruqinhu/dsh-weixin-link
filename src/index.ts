@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
 import { Config } from './config.js'
 import { IlinkClient } from './ilink/client.js'
 import { sendText } from './ilink/send.js'
@@ -43,7 +44,13 @@ export function expandTilde(path: string): string {
   return path.startsWith('~/') || path.startsWith('~\\') ? join(homedir(), path.slice(2)) : path
 }
 export default class WeixinLink extends Service {
-  static inject = ['tools', 'credentials']
+  // `sessionController` is required for inbound routing, not optional: cordis only
+  // puts a service on `ctx` when the plugin declares it, so without this entry
+  // `this.ctx.sessionController` is undefined and every inbound message falls back
+  // to an empty agent registry. The code can then look correct and still drop
+  // everything. `optional` is on `agents` instead, which really is absent in a
+  // push-only profile.
+  static inject = ['tools', 'credentials', 'sessionController', 'agents']
   static Config = Config
 
   private credential?: ResolvedCredential
@@ -82,7 +89,61 @@ export default class WeixinLink extends Service {
     })
   }
 
+  /**
+   * Report which of the services inbound routing depends on are actually present.
+   *
+   * Written to `dataDir/startup-diag.json` because cordis' logger only buffers in
+   * memory for a running instance — its exporters collect `warn`/`error` for the
+   * *startup failure* message, so a warn during normal operation is invisible from
+   * outside. Diagnosing the dropped-inbound bug without this meant guessing between
+   * three different causes; this makes the answer a file read.
+   */
+  private writeStartupDiagnostics(): void {
+    const controller = this.readService<{ resolveAgent?: unknown }>('sessionController')
+    const agents = this.readService<{ roots?: () => unknown[] }>('agents')
+    const payload = {
+      writtenAt: new Date().toISOString(),
+      sessionId: this.config.sessionId,
+      hasSessionController: controller !== undefined,
+      hasResolveAgent: controller?.resolveAgent !== undefined,
+      hasAgentsRegistry: agents !== undefined,
+      liveRoots: (() => {
+        try {
+          return agents?.roots?.().length
+        } catch {
+          return 'threw'
+        }
+      })(),
+    }
+    try {
+      writeFileSync(join(this.dataDir, 'startup-diag.json'), `${JSON.stringify(payload, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
+    } catch {
+      // Diagnostics must never take the plugin down.
+    }
+  }
+
+  /**
+   * Read a service from the context, or `undefined` when it is absent.
+   *
+   * Cordis throws on access to a property that is not in the plugin's `inject` list
+   * — "cannot get property \"sessions\" without inject" — instead of returning
+   * `undefined`. So an optional service cannot be probed with a plain property read:
+   * doing that in a diagnostic took the entire plugin down on first deploy. Every
+   * optional dependency is read through here.
+   */
+  private readService<T>(name: string): T | undefined {
+    try {
+      return (this.ctx as unknown as Record<string, T | undefined>)[name]
+    } catch {
+      return undefined
+    }
+  }
+
   private async bootstrap(): Promise<void> {
+    this.writeStartupDiagnostics()
     this.credential = await resolveCredential(this.ctx, {
       tokenEnv: this.config.tokenEnv,
       accountIdEnv: this.config.accountIdEnv,
@@ -221,8 +282,30 @@ export default class WeixinLink extends Service {
   private async dispatchInbound(inbound: readonly InboundText[]): Promise<void> {
     const agent = await this.pickAgent()
     if (agent === undefined) {
+      // Name what was actually available, not just that nothing was. Without this
+      // the drop is indistinguishable between three unrelated causes — no
+      // `sessionController` on the context, a resume that refused, and an empty
+      // registry — and the log line alone cannot tell them apart. That ambiguity is
+      // why this failure survived two attempted fixes. Reading a service that is not
+      // in `inject` throws in cordis, so every read goes through `readService`.
+      const controller = this.readService<{ resolveAgent?: unknown }>('sessionController')
+      const agents = this.readService<{ roots?: () => unknown[] }>('agents')
+      this.log.warn(
+        'inbound from %s dropped: sessionId=%o hasController=%o hasResolve=%o roots=%o',
+        inbound[0]?.userId,
+        this.config.sessionId,
+        controller !== undefined,
+        controller?.resolveAgent !== undefined,
+        (() => {
+          try {
+            return agents?.roots?.().length
+          } catch {
+            return 'threw'
+          }
+        })(),
+      )
       for (const message of inbound) {
-        this.log.warn('inbound from %s dropped (no agent to route to): %s', message.userId, message.text)
+        this.log.warn('  dropped text: %s', message.text)
       }
       return
     }

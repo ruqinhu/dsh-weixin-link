@@ -42,6 +42,30 @@ describe('resolveInboundAgent', () => {
     expect(calls).toEqual(['session-abc'])
   })
 
+  it('unwraps the { agent } shape that a cold resume returns', async () => {
+    // The real `resolveAgent` returns `Agent` when the session is already live but
+    // `{ agent }` when it had to resume — and after a restart every call takes the
+    // resume path. Treating only the bare shape as success made the fix look
+    // deployed while it still dropped every message.
+    const resumed = fakeAgent('resumed')
+    const context = contextOf({
+      resolveAgent: async () => ({ agent: resumed }),
+      roots: () => [],
+    })
+
+    expect(await resolveInboundAgent(context, 'session-abc')).toBe(resumed)
+  })
+
+  it('does not mistake an { error } result for a wrapped agent', async () => {
+    const live = fakeAgent('live')
+    const context = contextOf({
+      resolveAgent: async () => ({ error: new Error('not found'), agent: undefined }),
+      roots: () => [live],
+    })
+
+    expect(await resolveInboundAgent(context, 'session-abc')).toBe(live)
+  })
+
   it('does not consult the registry when the session resolves', async () => {
     const resumed = fakeAgent('resumed')
     let rootsCalled = false

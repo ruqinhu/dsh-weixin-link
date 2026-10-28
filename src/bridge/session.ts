@@ -127,7 +127,8 @@ export async function resolveInboundAgent(
   if (wanted !== '' && context.sessionController?.resolveAgent !== undefined) {
     try {
       const resolved = await context.sessionController.resolveAgent(wanted)
-      if (isAgent(resolved)) return resolved
+      const agent = unwrapAgent(resolved)
+      if (agent !== undefined) return agent
     } catch {
       // Fall through: a resume failure must not discard the message.
     }
@@ -136,7 +137,26 @@ export async function resolveInboundAgent(
   return context.agents.roots()[0]
 }
 
-/** Narrow `resolveAgent`'s `Agent | { error }` union without importing its error type. */
+/**
+ * Unwrap whatever `resolveAgent` returned into an `Agent`, or `undefined`.
+ *
+ * The real return type is a three-way union — `Agent` when the session was already
+ * live, `{ agent }` when it had to be resumed, and `{ error }` on failure. An early
+ * version of this checked only for `followup` on the value itself, so the `{ agent }`
+ * shape from every cold resume was rejected and the caller fell back to an empty
+ * registry: the fix appeared deployed and still dropped every message after a
+ * restart. Unwrapping explicitly is what makes the resumed case work.
+ */
+function unwrapAgent(value: unknown): Agent | undefined {
+  if (isAgent(value)) return value
+  if (typeof value === 'object' && value !== null && 'agent' in value) {
+    const inner = (value as { agent: unknown }).agent
+    if (isAgent(inner)) return inner
+  }
+  return undefined
+}
+
+/** Narrow the live-agent shape without importing the session-controller error type. */
 function isAgent(value: unknown): value is Agent {
   return (
     typeof value === 'object' &&
