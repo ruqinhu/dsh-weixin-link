@@ -270,6 +270,17 @@ export default class WeixinLink extends Service {
         this.log.warn('outbox replay failed for %s: %s', id, String(error))
       }
     }
+    // `sent/` is an audit trail, not a queue: keeping a fortnight is enough to
+    // answer "did this go out?" without growing for the life of the install.
+    try {
+      const removed = await this.outbox.pruneSent(14 * 24 * 60 * 60_000)
+      if (removed > 0) {
+        this.log.debug('pruned %d delivered outbox record(s)', removed)
+      }
+    } catch (error) {
+      // Housekeeping must never break delivery.
+      this.log.warn('outbox prune failed: %s', String(error))
+    }
   }
 
   async push(target: PushTarget, options?: { parkOnFailure?: boolean }): Promise<PushOutcome> {

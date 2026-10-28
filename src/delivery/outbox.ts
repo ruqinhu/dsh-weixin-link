@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export interface ParkedMessage {
@@ -108,5 +108,43 @@ export class Outbox {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
     }
+  }
+
+  /**
+   * Delete delivered records older than `maxAgeMs`.
+   *
+   * `sent/` exists so a delivery failure leaves evidence, but nothing ever removed
+   * anything: at roughly 3.8 MB a year this is not urgent, and it is still a
+   * directory that grows for the life of the install with no reader. Deleting on a
+   * timer rather than on every send keeps the cost proportional to traffic.
+   *
+   * The cutoff uses the filename's millisecond timestamp, not `mtime`, because a
+   * copy or restore rewrites `mtime` and would make old records look new — or new
+   * records look old enough to delete before anyone reads them.
+   */
+  async pruneSent(maxAgeMs: number): Promise<number> {
+    let names: string[]
+    try {
+      names = await readdir(this.sentDir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      throw error
+    }
+    const cutoff = Date.now() - maxAgeMs
+    let removed = 0
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue
+      const stamp = Number.parseInt(name.slice(0, name.indexOf('-')), 10)
+      // Unexpected names are left alone: they are not ours, and guessing would risk
+      // deleting a file whose age we cannot establish.
+      if (!Number.isFinite(stamp) || stamp >= cutoff) continue
+      try {
+        await unlink(join(this.sentDir, name))
+        removed += 1
+      } catch {
+        // A file removed by a concurrent prune is not an error.
+      }
+    }
+    return removed
   }
 }
