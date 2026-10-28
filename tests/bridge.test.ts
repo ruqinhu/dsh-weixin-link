@@ -5,6 +5,7 @@ import {
   toInboundText,
   toUserMessage,
   WEIXIN_SOURCE,
+  REPLY_DIRECTIVE,
 } from '../src/bridge/session.js'
 import type { WeixinMessage } from '../src/ilink/types.js'
 
@@ -79,9 +80,30 @@ describe('toUserMessage', () => {
 
     expect(built.role).toBe('user')
     expect(built.source).toEqual(WEIXIN_SOURCE)
-    expect(built.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(typeof built.id).toBe('string')
     expect(Object.isFrozen(built)).toBe(true)
+  })
+
+  it('tells the agent its reply must go out over weixin_push', () => {
+    // Observed turn: the agent produced a correct reply and ended `completed`
+    // without ever calling `weixin_push`, so the owner received nothing. The
+    // directive is the only signal that this turn arrived over Weixin.
+    const built = toUserMessage({ userId: 'u1', text: '你好', contextToken: 'tok' })
+
+    const text = (built.content[0] as { type: 'text'; text: string }).text
+    expect(text).toContain(REPLY_DIRECTIVE)
+    expect(text).toContain('weixin_push')
+    expect(text).toContain('你好')
+    // The owner's words must survive intact and after the directive.
+    expect(text.endsWith('你好')).toBe(true)
+  })
+
+  it('does not lose the message when the text is only whitespace-trimmed content', () => {
+    const built = toUserMessage({ userId: 'u1', text: '  多行\n内容  ', contextToken: 'tok' })
+
+    const text = (built.content[0] as { type: 'text'; text: string }).text
+    expect(text).toContain('多行')
+    expect(text).toContain('内容')
   })
 
   it('mints a distinct id per message', () => {
@@ -97,10 +119,11 @@ describe('deliverToAgent', () => {
     deliverToAgent({ followup } as never, { userId: 'u1', text: 'hi', contextToken: 't' })
 
     expect(followup).toHaveBeenCalledTimes(1)
-    expect(followup.mock.calls[0]?.[0]).toMatchObject({
-      role: 'user',
-      source: WEIXIN_SOURCE,
-      content: [{ type: 'text', text: 'hi' }],
-    })
+    const sent = followup.mock.calls[0]?.[0] as { role: string; source: unknown; content: { text: string }[] }
+    expect(sent.role).toBe('user')
+    expect(sent.source).toEqual(WEIXIN_SOURCE)
+    // The directive is prepended, so assert on the payload rather than exact text.
+    expect(sent.content[0]?.text).toContain(REPLY_DIRECTIVE)
+    expect(sent.content[0]?.text).toContain('hi')
   })
 })

@@ -70,6 +70,23 @@ declare module '@deepseek-ai/dsh-llm' {
 export const WEIXIN_SOURCE = { kind: 'weixin-link' } as const
 
 /**
+ * Instruction prepended to every inbound message.
+ *
+ * Without it the agent answers into the session and stops: an observed turn
+ * produced the correct reply text — "你好！有什么可以帮你的？" — and ended
+ * `completed` with no `weixin_push` call, so the owner saw nothing. The plugin
+ * cannot synthesize the reply itself (it has no access to the model), and the
+ * agent has no other way to learn that this turn arrived over Weixin rather than
+ * from the terminal. So the transport says so, per message.
+ *
+ * Kept short and imperative: it is prepended to the owner's text on every turn, so
+ * length is a per-message cost.
+ */
+export const REPLY_DIRECTIVE =
+  '[这条消息来自微信。你的回复必须通过调用 weixin_push 工具发送，否则用户收不到。' +
+  '回复要简洁，适合手机阅读。]'
+
+/**
  * Build the user message that carries inbound Weixin text into an agent.
  *
  * `createUserMessage` mints the identity and freezes the result, so the message
@@ -79,7 +96,7 @@ export const WEIXIN_SOURCE = { kind: 'weixin-link' } as const
  */
 export function toUserMessage(message: InboundText) {
   return createUserMessage({
-    content: [{ type: 'text', text: message.text }],
+    content: [{ type: 'text', text: `${REPLY_DIRECTIVE}\n\n${message.text}` }],
     source: WEIXIN_SOURCE,
   })
 }
