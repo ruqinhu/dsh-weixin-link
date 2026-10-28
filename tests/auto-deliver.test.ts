@@ -10,12 +10,25 @@ interface Harness {
   settle: () => Promise<void>
 }
 
-function harness(options: { tokenUserId?: string; token?: string; pushResult?: { ok: boolean } } = {}): Harness {
+function harness(
+  options: {
+    tokenUserId?: string
+    token?: string
+    pushResult?: { ok: boolean }
+    /** Simulate "no inbound message ever arrived", which means no context_token. */
+    noTarget?: boolean
+    timeZoneOffset?: number
+  } = {},
+): Harness {
   const push = vi.fn(async (_target: PushTarget) => options.pushResult ?? { ok: true, msgid: 'm1', retries: 0 })
   const deliver = new AutoDeliver({
-    resolveTarget: () => ({ toUserId: options.tokenUserId ?? 'u1', contextToken: options.token ?? 'tok' }),
+    resolveTarget: () =>
+      options.noTarget === true
+        ? undefined
+        : { toUserId: options.tokenUserId ?? 'u1', contextToken: options.token ?? 'tok' },
     push: push as never,
     log: { warn: vi.fn(), info: vi.fn() },
+    timeZoneOffset: options.timeZoneOffset,
   })
 
   let handler: ((sessionId: string, event: unknown) => void) | undefined
@@ -129,8 +142,7 @@ describe('AutoDeliver', () => {
     // Without an inbound message there is no token, so a send cannot succeed. It
     // must not be attempted, and it must not be parked either: the report would be
     // replayed days later, long after it was useful.
-    const h = harness()
-    h.deliver.setTargetResolver(() => undefined)
+    const h = harness({ noTarget: true })
     h.emit('s1', userMessage(1, 'schedule'))
     h.emit('s1', textMessage(1, 'report'))
     h.emit('s1', turnEnd(1))
@@ -205,8 +217,7 @@ describe('AutoDeliver', () => {
   })
 
   it('records the configured time zone offset in the empty notice', async () => {
-    const h = harness()
-    h.deliver.setTimeZoneOffset(8)
+    const h = harness({ timeZoneOffset: 8 })
     h.emit('s1', userMessage(1, 'schedule'))
     h.emit('s1', turnEnd(1))
     await h.settle()
@@ -221,11 +232,12 @@ describe('delivery trace', () => {
    * "was delivery considered at 07:00?" is unanswerable after the fact, and a
    * skipped turn leaves no receipt to inspect.
    */
-  function traced() {
+  function traced(options: { noTarget?: boolean } = {}) {
+    const noTarget = options.noTarget === true
     const lines: string[] = []
     const push = vi.fn(async () => ({ ok: true, msgid: 'm1', retries: 0 }))
     const deliver = new AutoDeliver({
-      resolveTarget: () => ({ toUserId: 'u1', contextToken: 'tok' }),
+      resolveTarget: () => (noTarget ? undefined : { toUserId: 'u1', contextToken: 'tok' }),
       push: push as never,
       log: { warn: vi.fn(), info: vi.fn() },
       trace: (line) => lines.push(line),
@@ -282,8 +294,7 @@ describe('delivery trace', () => {
   })
 
   it('records a dropped send when no token exists', async () => {
-    const { lines, deliver } = traced()
-    deliver.setTargetResolver(() => undefined)
+    const { lines, deliver } = traced({ noTarget: true })
     deliver.observe('s1', userMessage(1, 'schedule') as never)
     deliver.observe('s1', textMessage(1, 'body') as never)
     deliver.observe('s1', turnEnd(1) as never)

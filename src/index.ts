@@ -11,6 +11,7 @@ import { pollUpdates } from './ilink/updates.js'
 import { pushWithRetry, type PushOutcome, type PushTarget } from './delivery/push.js'
 import { AutoDeliver } from './deliver/auto-deliver.js'
 import { Outbox } from './delivery/outbox.js'
+import { OutboxReplayer } from './delivery/outbox-replayer.js'
 import { isPermanentlyUnsendable } from './delivery/retryable.js'
 import { ContextTokenStore } from './store/context-token.js'
 import { ReceiptStore } from './store/receipts.js'
@@ -416,52 +417,24 @@ export default class WeixinLink extends Service {
     )
   }
 
+  /**
+   * Replay parked messages.
+   *
+   * The decision — send, keep, or drop — lives in {@link OutboxReplayer} so it can
+   * be tested without a plugin host. This method only supplies the wiring: parked
+   * entries, the recipient's cached token, and the classifier that decides which
+   * failures are permanent.
+   */
   private async replayOutbox(): Promise<void> {
-    // Each replayed message is already in the outbox. `push()` parks on failure
-    // so that a *new* message survives a dead token, but re-parking a replayed
-    // entry would write a second file for the same text: one failed replay
-    // doubles the outbox, and when the token finally works every copy is sent.
-    // So replay suppresses parking and owns the entry's fate itself.
-    for (const { id, target } of await this.pendingTargets()) {
-      try {
-        const outcome = await this.push(target, { parkOnFailure: false })
-        if (outcome.ok) {
-          await this.outbox.markSent(id)
-          continue
-        }
-        // Keeping the entry is the default. Only a failure we can prove is
-        // permanent may drop it.
-        //
-        // This used to be inverted: anything that was not NEEDS_INBOUND or
-        // RATE_LIMITED was treated as permanent and deleted. But the failure that
-        // actually happens here is `ret:-2 prepare failed`, classified UNKNOWN,
-        // which is transient — and so the replay deleted the very messages it
-        // existed to rescue. A 12:40 noon report was lost that way today: the send
-        // failed, the entry was removed, and the receipt said ok:false while the
-        // outbox was already empty. A retry loop that cannot distinguish
-        // "unsendable" from "not yet sendable" must assume the latter, because
-        // retrying costs a little traffic and deleting costs the report.
-        if (isPermanentlyUnsendable(outcome.errorCode)) {
-          this.log.warn('dropping permanently unsendable outbox entry %s: %s', id, outcome.errorCode)
-          await this.outbox.markSent(id)
-        }
-      } catch (error) {
-        // One unsendable entry must not abort the rest of the batch, and must
-        // not stop the inbound messages in this poll round from being routed.
-        this.log.warn('outbox replay failed for %s: %s', id, String(error))
-      }
-    }
-    // `sent/` is an audit trail, not a queue: keeping a fortnight is enough to
-    // answer "did this go out?" without growing for the life of the install.
-    try {
-      const removed = await this.outbox.pruneSent(14 * 24 * 60 * 60_000)
-      if (removed > 0) {
-        this.log.debug('pruned %d delivered outbox record(s)', removed)
-      }
-    } catch (error) {
-      // Housekeeping must never break delivery.
-      this.log.warn('outbox prune failed: %s', String(error))
-    }
+    const replayer = new OutboxReplayer({
+      list: () => this.pendingTargets(),
+      push: (target, options) => this.push(target, options),
+      markSent: (id) => this.outbox.markSent(id),
+      pruneSent: (maxAgeMs) => this.outbox.pruneSent(maxAgeMs),
+      isPermanentlyUnsendable,
+      log: this.log,
+    })
+    await replayer.replay()
   }
 
   async push(target: PushTarget, options?: { parkOnFailure?: boolean }): Promise<PushOutcome> {

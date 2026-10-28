@@ -28,6 +28,10 @@ export interface AutoDeliverDeps {
   /**
    * The current send target, or `undefined` when no inbound message has ever been
    * received (so no `context_token` exists and no send can succeed).
+   *
+   * Called per delivery rather than captured at construction: the credential and
+   * the first inbound token both arrive later, so a captured value would freeze
+   * `undefined`. Being a callback is what makes that lazy; no setter is needed.
    */
   resolveTarget: () => AutoDeliverTarget | undefined
   /** Send one message, going through the plugin's normal retry/park/receipt path. */
@@ -36,6 +40,14 @@ export interface AutoDeliverDeps {
     warn: (...args: unknown[]) => void
     info: (...args: unknown[]) => void
   }
+  /**
+   * Local time offset used in the empty-turn notice.
+   *
+   * Constructor config, not a setter: it is deployment identity and never changes
+   * for the life of a process. A setter would make "unset" a silent, plausible
+   * state — a test that forgot to set it would still pass, just with a UTC timestamp.
+   */
+  timeZoneOffset?: number
   /**
    * Optional durable trace of every delivery decision.
    *
@@ -49,21 +61,10 @@ export interface AutoDeliverDeps {
 
 export class AutoDeliver {
   private readonly tracker = new TurnTracker()
-  private resolveTargetCb: () => AutoDeliverTarget | undefined
-  private timeZoneOffset = 8
+  private readonly timeZoneOffset: number
 
   constructor(private readonly deps: AutoDeliverDeps) {
-    this.resolveTargetCb = deps.resolveTarget
-  }
-
-  /** Replace the target resolver; production rebinds it when credentials are (re)loaded. */
-  setTargetResolver(resolve: () => AutoDeliverTarget | undefined): void {
-    this.resolveTargetCb = resolve
-  }
-
-  /** Local time offset used in the empty-turn notice. */
-  setTimeZoneOffset(hours: number): void {
-    this.timeZoneOffset = hours
+    this.timeZoneOffset = deps.timeZoneOffset ?? 8
   }
 
   /**
@@ -113,7 +114,7 @@ export class AutoDeliver {
 
   private async deliver(text: string, sessionId: string, turn: number): Promise<void> {
     try {
-      const target = this.resolveTargetCb()
+      const target = this.deps.resolveTarget()
       if (target === undefined) {
         // No context_token yet: a send is guaranteed to fail with NEEDS_INBOUND.
         // Deliberately not parked — replaying a stale report days later is worse
