@@ -9,6 +9,7 @@ import { sendText } from './ilink/send.js'
 import { pollUpdates } from './ilink/updates.js'
 import { pushWithRetry, type PushOutcome, type PushTarget } from './delivery/push.js'
 import { Outbox } from './delivery/outbox.js'
+import { isPermanentlyUnsendable } from './delivery/retryable.js'
 import { ContextTokenStore } from './store/context-token.js'
 import { ReceiptStore } from './store/receipts.js'
 import { resolveCredential, type ResolvedCredential } from './store/credential.js'
@@ -20,6 +21,16 @@ export const name = 'weixin-link'
 
 /** Delay before retrying a failed poll round, so a transport blip cannot spin. */
 const POLL_RETRY_MS = 5_000
+
+/**
+ * How often to retry parked messages without waiting for an inbound message.
+ *
+ * A parked message is usually a transient rejection (`ret:-2 prepare failed`
+ * clears by itself), so the right trigger is time, not a human. Five minutes is
+ * frequent enough that a brief 07:00 rejection still delivers the report while it
+ * is still useful, and rare enough to cost nothing when the outbox is empty.
+ */
+const OUTBOX_RETRY_MS = 5 * 60_000
 
 export function expandTilde(path: string): string {
   if (path === '~') return homedir()
@@ -129,6 +140,7 @@ export default class WeixinLink extends Service {
       const client = this.client as IlinkClient
 
       const loop = async (): Promise<void> => {
+        let lastReplay = Date.now()
         while (!stopped) {
           try {
             const round = await pollUpdates(
@@ -137,6 +149,22 @@ export default class WeixinLink extends Service {
               { timeoutMs: this.config.pollTimeoutMs },
             )
             this.pollBuf = round.nextBuf
+
+            // Retry the outbox on a timer, not only on inbound.
+            //
+            // Replaying solely when a message arrives assumes the owner will keep
+            // talking to the bot. He may not: if the 07:00 report is parked and he
+            // is asleep or busy, nothing is retried until he happens to send
+            // something — possibly the next day, long after the report mattered.
+            // The queue exists to survive a transient rejection, and a transient
+            // rejection clears on its own, so waiting for a human is the wrong
+            // trigger. This is cheap: `pendingTargets()` reads a directory that is
+            // empty in the normal case.
+            if (Date.now() - lastReplay >= OUTBOX_RETRY_MS) {
+              lastReplay = Date.now()
+              await this.replayOutbox()
+            }
+
             if (round.idle) continue
 
             const inbound = collectInbound(round.messages, {
@@ -216,12 +244,24 @@ export default class WeixinLink extends Service {
     for (const { id, target } of await this.pendingTargets()) {
       try {
         const outcome = await this.push(target, { parkOnFailure: false })
-        // Drop the entry on success, and also on a permanent failure that will
-        // never succeed — otherwise a single unsendable message is retried
-        // forever and grows the outbox on every inbound.
         if (outcome.ok) {
           await this.outbox.markSent(id)
-        } else if (outcome.errorCode !== undefined && outcome.errorCode !== 'NEEDS_INBOUND' && outcome.errorCode !== 'RATE_LIMITED') {
+          continue
+        }
+        // Keeping the entry is the default. Only a failure we can prove is
+        // permanent may drop it.
+        //
+        // This used to be inverted: anything that was not NEEDS_INBOUND or
+        // RATE_LIMITED was treated as permanent and deleted. But the failure that
+        // actually happens here is `ret:-2 prepare failed`, classified UNKNOWN,
+        // which is transient — and so the replay deleted the very messages it
+        // existed to rescue. A 12:40 noon report was lost that way today: the send
+        // failed, the entry was removed, and the receipt said ok:false while the
+        // outbox was already empty. A retry loop that cannot distinguish
+        // "unsendable" from "not yet sendable" must assume the latter, because
+        // retrying costs a little traffic and deleting costs the report.
+        if (isPermanentlyUnsendable(outcome.errorCode)) {
+          this.log.warn('dropping permanently unsendable outbox entry %s: %s', id, outcome.errorCode)
           await this.outbox.markSent(id)
         }
       } catch (error) {
