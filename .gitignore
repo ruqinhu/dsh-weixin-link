@@ -5,3 +5,4 @@ lib/
 .credentials.json
 coverage/
 .vitest/
+*.tgz

@@ -14,6 +14,7 @@ import { ReceiptStore } from './store/receipts.js'
 import { resolveCredential, type ResolvedCredential } from './store/credential.js'
 import { collectInbound, deliverToAgent, type InboundText } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
+import { isDeliverable, undeliverableReason } from './health.js'
 
 export const name = 'weixin-link'
 
@@ -291,14 +292,25 @@ export default class WeixinLink extends Service {
     const age = owner === undefined ? undefined : this.contextTokens.ageHours(owner, now)
     const last = await this.receipts.lastDelivery(now)
     const pending = await this.pendingTargets()
+    const stuck = pending.length
+    const health = {
+      hasCredential: this.credential !== undefined,
+      contextToken: owner === undefined ? undefined : this.contextTokens.get(owner),
+      stuck,
+    }
+    // Report the real reason rather than a bare boolean: the field is read by a
+    // human deciding whether the channel is usable, and "not logged in" without
+    // the cause invites the wrong fix.
+    const reason = undeliverableReason(health)
+    if (reason !== undefined) this.log.warn('channel not deliverable: %s', reason)
 
     return {
-      loggedIn: this.credential !== undefined,
+      loggedIn: isDeliverable(health),
       accountId: this.credential?.accountId,
       contextTokenAgeHours: age,
       lastDelivery: last === undefined ? undefined : { id: last.id, ts: last.ts },
       outboxCount: await this.outbox.count(),
-      pendingMessages: pending.length,
+      pendingMessages: stuck,
     }
   }
 }
