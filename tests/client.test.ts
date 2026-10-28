@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { IlinkClient, IlinkHttpError, IlinkTimeoutError, makeUin } from '../src/ilink/client.js'
+import {
+  ILINK_APP_CLIENT_VERSION,
+  ILINK_APP_ID,
+  IlinkClient,
+  IlinkHttpError,
+  IlinkTimeoutError,
+  makeUin,
+} from '../src/ilink/client.js'
 import { sendText } from '../src/ilink/send.js'
 import { IlinkError } from '../src/ilink/errors.js'
 import { DEFAULT_POLL_TIMEOUT_MS, SERVER_HOLD_MS, pollUpdates } from '../src/ilink/updates.js'
@@ -51,6 +58,25 @@ describe('IlinkClient', () => {
     expect(seen?.get('authorizationtype')).toBe('ilink_bot_token')
     expect(seen?.get('content-type')).toBe('application/json')
     expect(seen?.get('x-wechat-uin')).toMatch(/^[A-Za-z0-9+/=]+$/)
+  })
+
+  it('identifies as the iLink bot app, or the server accepts without delivering', async () => {
+    // Observed live: without these two headers the server answers
+    // {"message_id": …} — a success — and the message never reaches the owner.
+    // Same body, same token; only the headers differed.
+    let seen: Headers | undefined
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      seen = new Headers(init.headers)
+      return jsonResponse({ ret: 0 })
+    })
+
+    const client = new IlinkClient({ baseUrl: BASE, token: 't' })
+    await client.post('sendmessage', { msg: {} })
+
+    expect(seen?.get('ilink-app-id')).toBe(ILINK_APP_ID)
+    expect(seen?.get('ilink-app-clientversion')).toBe(String(ILINK_APP_CLIENT_VERSION))
+    // 2.2.0 encoded as major<<16 | minor<<8 | patch
+    expect(ILINK_APP_CLIENT_VERSION).toBe((2 << 16) | (2 << 8))
   })
 
   it('generates a different X-WECHAT-UIN per request', async () => {
@@ -118,6 +144,27 @@ describe('sendText', () => {
     expect(body.msg.message_state).toBe(2)
     expect(body.msg.context_token).toBe('tok')
     expect(body.msg.item_list).toEqual([{ type: 1, text_item: { text: 'hello' } }])
+  })
+
+  it('carries from_user_id and a fresh client_id, like the reference client', async () => {
+    // Live comparison against the reference implementation: the body that reached
+    // the phone included `from_user_id: ""` and a unique `client_id`; the body
+    // without them was accepted and never delivered.
+    const seen: any[] = []
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      seen.push(JSON.parse(String(init.body)))
+      return jsonResponse({ message_id: 1 })
+    })
+
+    const client = new IlinkClient({ baseUrl: BASE, token: 't' })
+    await sendText(client, { toUserId: 'u1', contextToken: 'tok', text: 'a' })
+    await sendText(client, { toUserId: 'u1', contextToken: 'tok', text: 'b' })
+
+    expect(seen[0].msg.from_user_id).toBe('')
+    expect(typeof seen[0].msg.client_id).toBe('string')
+    expect(seen[0].msg.client_id.length).toBeGreaterThan(0)
+    // Must differ per message: a reused id can be suppressed as a duplicate.
+    expect(seen[0].msg.client_id).not.toBe(seen[1].msg.client_id)
   })
 
   it('accepts a send whose response omits ret entirely', async () => {

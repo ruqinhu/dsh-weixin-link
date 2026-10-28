@@ -37,6 +37,20 @@ export function makeUin(random: () => number = Math.random): string {
   return Buffer.from(String(value), 'utf8').toString('base64')
 }
 
+/**
+ * Client identity headers.
+ *
+ * `iLink-App-Id` and `iLink-App-ClientVersion` are not optional decoration: the
+ * server answers `{"message_id": …}` — a success — without them, but the message is
+ * never delivered to the conversation. Verified against live traffic: the same
+ * body, token and context_token were accepted both ways, and only the variant
+ * carrying these two headers reached the owner's phone. The values mirror the
+ * reference client (`ILINK_APP_ID = "bot"`, version `2.2.0` encoded as
+ * `2<<16 | 2<<8 | 0`).
+ */
+export const ILINK_APP_ID = 'bot'
+export const ILINK_APP_CLIENT_VERSION = (2 << 16) | (2 << 8) | 0
+
 export class IlinkClient {
   private readonly baseUrl: string
 
@@ -57,6 +71,8 @@ export class IlinkClient {
           AuthorizationType: 'ilink_bot_token',
           Authorization: `Bearer ${this.opts.token}`,
           'X-WECHAT-UIN': makeUin(),
+          'iLink-App-Id': ILINK_APP_ID,
+          'iLink-App-ClientVersion': String(ILINK_APP_CLIENT_VERSION),
         },
         body: JSON.stringify(body),
         signal: controller.signal,

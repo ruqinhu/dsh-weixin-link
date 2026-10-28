@@ -10,6 +10,17 @@ export interface SendTextArgs {
 }
 
 /**
+ * Mint a per-message client id.
+ *
+ * The reference client sends one on every `sendmessage`. Omitting it entirely is
+ * what this plugin did while messages were being accepted (`message_id` returned)
+ * and never delivered.
+ */
+function makeClientId(): string {
+  return `dsh-weixin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
  * Send one text message.
  *
  * Success is decided by {@link readSendResponse}, not by inspecting `ret`: an
@@ -25,7 +36,9 @@ export async function sendText(
   const items: ItemListEntry[] = [{ type: ITEM_TYPE_TEXT, text_item: { text: args.text } }]
   const body: SendMessageBody = {
     msg: {
+      from_user_id: '',
       to_user_id: args.toUserId,
+      client_id: makeClientId(),
       message_type: MESSAGE_TYPE_BOT,
       message_state: MESSAGE_STATE_FINISH,
       context_token: args.contextToken,

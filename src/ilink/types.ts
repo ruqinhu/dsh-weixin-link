@@ -78,6 +78,18 @@ export interface SendMessageBody {
     message_state: number
     context_token: string
     item_list: ItemListEntry[]
+    /**
+     * Empty for a bot-originated message. The reference client always sends the
+     * key, and omitting it changes how the server associates the message with the
+     * peer's conversation.
+     */
+    from_user_id?: string
+    /**
+     * Per-message client identifier. The reference client generates a fresh one for
+     * every send; the server uses it for its own duplicate suppression, so reusing a
+     * value can make a legitimate message look like a replay.
+     */
+    client_id?: string
   }
 }
 
