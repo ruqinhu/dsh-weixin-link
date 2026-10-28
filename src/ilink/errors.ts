@@ -39,6 +39,22 @@ export function classifyIlinkError(ret: number, errmsg?: string): IlinkError | u
   const text = errmsg === undefined || errmsg === '' ? `iLink ret=${ret}` : errmsg
   const lower = text.toLowerCase()
 
+  // ret=-2 is a parameter error, and errmsg says which one. `prepare failed` has
+  // no token-ish words in it, so keyword matching missed it and it fell through to
+  // UNKNOWN — while being, in the protocol's own words, the case where the peer's
+  // iLink session is not ready because there is no inbound message yet. That is
+  // precisely NEEDS_INBOUND, and classifying it as UNKNOWN made the outbox retry
+  // something that cannot clear until the owner sends a message.
+  //
+  // `unknown error` with ret=-2 is the expired-session variant; it needs the same
+  // treatment for the same reason.
+  if (ret === -2) {
+    const label = lower.includes('prepare') || lower.includes('unknown error') ? 'session' : 'other'
+    if (label === 'session') {
+      return new IlinkError('NEEDS_INBOUND', ret, text)
+    }
+  }
+
   const mentionsContext = lower.includes('context')
   const mentionsToken = lower.includes('token')
   const mentionsExpiry =
