@@ -11,6 +11,15 @@ export interface Config {
   defaultUserId: string
   /** Inbound bot messages are ignored so the bot never answers itself. */
   echoOwnMessages: boolean
+  /**
+   * Session that inbound messages are delivered to.
+   *
+   * Empty means "route to whichever root agent is already live". That works until
+   * the process restarts — after which no agent is resident and inbound text has
+   * nowhere to go. Naming the session lets the plugin resume it on demand, which is
+   * what keeps the conversation alive across restarts.
+   */
+  sessionId: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -36,4 +45,9 @@ export const Config: Schema<Config> = Schema.object({
   echoOwnMessages: Schema.boolean()
     .default(false)
     .description('Whether inbound messages sent by the bot itself should be surfaced.'),
+  sessionId: Schema.string()
+    .default('')
+    .description(
+      'Session inbound messages are routed to, resumed when cold. Empty means the first live root agent.',
+    ),
 })

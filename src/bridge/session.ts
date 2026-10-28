@@ -95,3 +95,53 @@ export function toUserMessage(message: InboundText) {
 export function deliverToAgent(agent: Agent, message: InboundText): void {
   agent.followup(toUserMessage(message))
 }
+
+/** The slice of host context that inbound routing needs. */
+export interface InboundTargetContext {
+  sessionController?: { resolveAgent?: (sessionId: string) => Promise<unknown> }
+  agents?: { roots?: () => Agent[] }
+}
+
+/**
+ * Pick the agent that inbound text should be delivered to.
+ *
+ * The registry (`agents.roots()`) lists only agents that are *currently resident*.
+ * After a restart that list is empty until something asks for a session, so routing
+ * on it alone silently drops every message the owner sends — while the scheduled
+ * reports keep arriving, which makes the bot look alive but mute. That was the
+ * observed failure: 31 sessions on disk, `agentAvailable: false` on all of them, and
+ * inbound text reaching a branch that logged and returned.
+ *
+ * `sessionController.resolveAgent` is the same entry point `dsh-schedule` uses: it
+ * resumes the session from disk and hands back a live agent. So a configured
+ * `sessionId` is resumed on demand, and the registry remains only a fallback for
+ * profiles that have no controller. Every failure path falls through to the
+ * fallback rather than propagating, because dropping the whole batch is worse than
+ * trying the next option.
+ */
+export async function resolveInboundAgent(
+  context: InboundTargetContext,
+  sessionId: string,
+): Promise<Agent | undefined> {
+  const wanted = sessionId.trim()
+  if (wanted !== '' && context.sessionController?.resolveAgent !== undefined) {
+    try {
+      const resolved = await context.sessionController.resolveAgent(wanted)
+      if (isAgent(resolved)) return resolved
+    } catch {
+      // Fall through: a resume failure must not discard the message.
+    }
+  }
+  if (context.agents?.roots === undefined) return undefined
+  return context.agents.roots()[0]
+}
+
+/** Narrow `resolveAgent`'s `Agent | { error }` union without importing its error type. */
+function isAgent(value: unknown): value is Agent {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !('error' in value) &&
+    typeof (value as { followup?: unknown }).followup === 'function'
+  )
+}

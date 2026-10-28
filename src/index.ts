@@ -13,7 +13,13 @@ import { isPermanentlyUnsendable } from './delivery/retryable.js'
 import { ContextTokenStore } from './store/context-token.js'
 import { ReceiptStore } from './store/receipts.js'
 import { resolveCredential, type ResolvedCredential } from './store/credential.js'
-import { collectInbound, deliverToAgent, type InboundText } from './bridge/session.js'
+import {
+  collectInbound,
+  deliverToAgent,
+  resolveInboundAgent,
+  type InboundTargetContext,
+  type InboundText,
+} from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
 
@@ -179,7 +185,7 @@ export default class WeixinLink extends Service {
               await this.contextTokens.record(message.userId, message.contextToken, now)
             }
             await this.replayOutbox()
-            this.dispatchInbound(inbound)
+            await this.dispatchInbound(inbound)
           } catch (error) {
             if (stopped) return
             this.log.warn('poll round failed: %s', String(error))
@@ -198,16 +204,25 @@ export default class WeixinLink extends Service {
   /**
    * Route inbound text into an agent session.
    *
-   * A conversation needs a live agent. This plugin does not own one, so it uses
-   * the most recently active root agent when one exists. Without it the token
-   * cache is still refreshed — which is what unblocks delivery — so a deployment
-   * that only pushes reports stays fully functional with no agent attached.
+   * A conversation needs a live agent, and after a restart there is none: the
+   * registry only holds agents that are currently resident, so `roots()` is empty
+   * until something asks for a session. `dsh-schedule` does not read the registry
+   * for this reason — it calls `sessionController.resolveAgent(sessionId)`, which
+   * resumes the session from disk and returns a live agent. Reading the registry
+   * instead made every inbound message after a restart fall into the "no agent"
+   * branch below, so the owner could send text and get nothing back while the
+   * scheduled reports kept arriving.
+   *
+   * So: prefer the configured session (resuming it when cold), and fall back to an
+   * already-live root agent only when no session is configured. A profile with no
+   * `sessionController` at all — a push-only deployment — still refreshes the token
+   * cache and pushes reports; it simply cannot hold a conversation.
    */
-  private dispatchInbound(inbound: readonly InboundText[]): void {
-    const agent = this.pickAgent()
+  private async dispatchInbound(inbound: readonly InboundText[]): Promise<void> {
+    const agent = await this.pickAgent()
     if (agent === undefined) {
       for (const message of inbound) {
-        this.log.info('inbound from %s (no agent to route to): %s', message.userId, message.text)
+        this.log.warn('inbound from %s dropped (no agent to route to): %s', message.userId, message.text)
       }
       return
     }
@@ -225,14 +240,15 @@ export default class WeixinLink extends Service {
   /**
    * The agent to deliver inbound text to.
    *
-   * `ctx.agents` is optional: a profile without `dsh-agent` (a pure scheduler, for
-   * example) has no registry at all, and reporting that as an error would make a
-   * push-only deployment look broken.
+   * Delegated to {@link resolveInboundAgent} so the interesting part — resuming a
+   * cold session, and falling back when that fails — is testable without booting a
+   * host. See that function for why the registry alone is not enough.
    */
-  private pickAgent(): Agent | undefined {
-    const registry = (this.ctx as Context & { agents?: { roots?: () => Agent[] } }).agents
-    if (registry?.roots === undefined) return undefined
-    return registry.roots()[0]
+  private async pickAgent(): Promise<Agent | undefined> {
+    return resolveInboundAgent(
+      this.ctx as unknown as InboundTargetContext,
+      this.config.sessionId,
+    )
   }
 
   private async replayOutbox(): Promise<void> {
