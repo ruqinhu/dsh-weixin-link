@@ -3,12 +3,13 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { writeFileSync } from 'node:fs'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { Config } from './config.js'
 import { IlinkClient } from './ilink/client.js'
 import { sendText } from './ilink/send.js'
 import { pollUpdates } from './ilink/updates.js'
 import { pushWithRetry, type PushOutcome, type PushTarget } from './delivery/push.js'
+import { AutoDeliver } from './deliver/auto-deliver.js'
 import { Outbox } from './delivery/outbox.js'
 import { isPermanentlyUnsendable } from './delivery/retryable.js'
 import { ContextTokenStore } from './store/context-token.js'
@@ -63,6 +64,7 @@ export default class WeixinLink extends Service {
   /** Disambiguates failure receipt ids that would otherwise collide within a millisecond. */
   private failureSeq = 0
   private readonly log: ReturnType<Context['logger']>
+  private autoDeliver?: AutoDeliver
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'weixin')
@@ -87,6 +89,86 @@ export default class WeixinLink extends Service {
         disposed = true
       }
     })
+
+    this.startAutoDeliver()
+  }
+
+  /**
+   * Deliver finished turns without the agent having to ask.
+   *
+   * The subscription is `{ global: true }` because the turns that matter are not
+   * this plugin's own: a scheduled task runs in the schedule plugin's session, and
+   * the harness only exposes every session's events to a global subscriber.
+   *
+   * `queueMicrotask` ordering and all judgement live in `AutoDeliver`; this method
+   * only wires dependencies.
+   */
+  private startAutoDeliver(): void {
+    this.autoDeliver = new AutoDeliver({
+      // Resolve lazily: the credential and the first inbound token both arrive
+      // after construction, so capturing a value here would freeze `undefined`.
+      resolveTarget: () => this.currentPushTarget(),
+      push: (target) => this.push(target),
+      log: {
+        // cordis' logger takes printf-style args, not a rest tuple; forwarding the
+        // first two covers every message this module emits.
+        info: (message: unknown, ...args: unknown[]) => {
+          this.log.info(String(message), ...(args as []))
+        },
+        warn: (message: unknown, ...args: unknown[]) => {
+          this.log.warn(String(message), ...(args as []))
+        },
+      },
+      trace: (line) => this.appendDeliveryTrace(line),
+    })
+
+    this.ctx.effect(() => {
+      const dispose = this.ctx.on(
+        'session/event',
+        (session: { id: string }, event: { type: string; data?: unknown }) => {
+          this.autoDeliver?.observe(session.id, event)
+        },
+        { global: true },
+      )
+      return () => {
+        dispose()
+      }
+    })
+  }
+
+  /**
+   * The recipient and reply token for an unsolicited send.
+   *
+   * `undefined` when no inbound message has ever been seen: without a
+   * `context_token` the server rejects every send with `NEEDS_INBOUND`, so callers
+   * can skip the attempt rather than logging a guaranteed failure.
+   */
+  private currentPushTarget(): { toUserId: string; contextToken: string } | undefined {
+    const toUserId = this.defaultUserId()
+    if (toUserId === undefined) return undefined
+    const contextToken = this.contextTokens.get(toUserId)
+    if (contextToken === undefined) return undefined
+    return { toUserId, contextToken }
+  }
+
+  /**
+   * Append one line to the delivery trace.
+   *
+   * A separate file from the receipts on purpose: receipts record sends that were
+   * attempted, while this records the *decision* — including the turns that were
+   * deliberately skipped. When a report does not arrive, the first question is
+   * whether delivery was considered at all, and `receipts.jsonl` cannot answer it
+   * because a skipped turn produces no receipt.
+   *
+   * Failures are swallowed: a full disk must not turn a delivery into a crash.
+   */
+  private appendDeliveryTrace(line: string): void {
+    const stamp = new Date().toISOString()
+    try {
+      appendFileSync(join(this.dataDir, 'delivery-trace.log'), `${stamp} ${line}\n`, { mode: 0o600 })
+    } catch {
+      // Tracing is diagnostic only.
+    }
   }
 
   /**
