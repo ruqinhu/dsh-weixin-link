@@ -45,7 +45,14 @@ export class Outbox {
       reason: input.reason,
       parkedAt: new Date().toISOString(),
     }
-    await writeFile(join(this.pendingDir, `${id}.json`), `${JSON.stringify(message, null, 2)}\n`, 'utf8')
+    // Write-then-rename, so a kill mid-write cannot leave a truncated file in
+    // `pending/`. `list()` skips unparseable entries by design, so a partial
+    // write would otherwise be invisible forever: never counted, never replayed,
+    // and no error anywhere.
+    const final = join(this.pendingDir, `${id}.json`)
+    const temp = `${final}.tmp`
+    await writeFile(temp, `${JSON.stringify(message, null, 2)}\n`, 'utf8')
+    await rename(temp, final)
     return message
   }
 
@@ -60,6 +67,7 @@ export class Outbox {
     }
 
     const messages: ParkedMessage[] = []
+    const skipped: string[] = []
     for (const name of names.filter((n) => n.endsWith('.json')).sort()) {
       // One truncated or hand-edited file must not make the whole outbox
       // unreadable: this runs during plugin bootstrap, so throwing here would
@@ -68,13 +76,24 @@ export class Outbox {
         const parsed = JSON.parse(await readFile(join(this.pendingDir, name), 'utf8')) as ParkedMessage
         if (typeof parsed?.toUserId === 'string' && typeof parsed?.text === 'string') {
           messages.push(parsed)
+        } else {
+          skipped.push(name)
         }
       } catch {
-        continue
+        skipped.push(name)
       }
+    }
+    // Surface skipped files rather than dropping them silently: an entry that is
+    // on disk but unreplayable is a report the user will never receive, and the
+    // only chance to notice is here.
+    if (skipped.length > 0) {
+      this.onSkip?.(skipped)
     }
     return messages
   }
+
+  /** Injected by the plugin so `list()` can report corrupt entries through the logger. */
+  onSkip?: (names: string[]) => void
 
   async count(): Promise<number> {
     return (await this.list()).length

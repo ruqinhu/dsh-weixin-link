@@ -78,7 +78,15 @@ export async function pushWithRetry(target: PushTarget, deps: PushDeps): Promise
         continue
       }
 
-      return { ok: false, errorCode: ilink.code, retries, shouldPark: false }
+      // Everything else — HTTP 5xx, timeouts, DNS failure — parks. A transient
+      // outage is the most likely reason a scheduled report fails at 07:00, and
+      // returning shouldPark:false here means the report is dropped with no
+      // trace: nothing on disk, nothing replayed, and `status` only ever
+      // reports the last *successful* delivery, so the loss is invisible. The
+      // one-request risk is a duplicate if the server accepted a send whose
+      // response was lost; a duplicate is recoverable, a missing morning report
+      // is not.
+      return { ok: false, errorCode: ilink.code, retries, shouldPark: true }
     }
   }
 }

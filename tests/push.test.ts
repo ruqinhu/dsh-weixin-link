@@ -86,6 +86,31 @@ describe('pushWithRetry', () => {
     expect(sleep).not.toHaveBeenCalled()
   })
 
+  it('parks an unknown failure instead of dropping it', async () => {
+    // The regression this guards: `shouldPark:false` for every non-rate-limit
+    // error meant an HTTP 5xx or a timeout at 07:00 discarded the morning report
+    // with nothing on disk, nothing to replay, and no receipt an operator would
+    // see — `status` only reports the last *successful* delivery.
+    const send = senderThatThrows([
+      new IlinkError('UNKNOWN', 500, 'bad gateway'),
+      new IlinkError('UNKNOWN', 500, 'bad gateway'),
+    ])
+
+    const outcome = await pushWithRetry(base, { send, sleep: async () => {} })
+
+    expect(outcome.ok).toBe(false)
+    expect(outcome.shouldPark).toBe(true)
+  })
+
+  it('parks a timeout rather than treating it as unsendable', async () => {
+    const send = senderThatThrows([new Error('timeout'), new Error('timeout')])
+
+    const outcome = await pushWithRetry(base, { send, sleep: async () => {} })
+
+    expect(outcome.errorCode).toBe('UNKNOWN')
+    expect(outcome.shouldPark).toBe(true)
+  })
+
   it('wraps a non-IlinkError as UNKNOWN and retries once', async () => {
     const send = senderThatThrows([new Error('network down'), new Error('network down')])
     const outcome = await pushWithRetry(base, { send, sleep: async () => {} })

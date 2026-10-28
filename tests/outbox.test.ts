@@ -73,4 +73,40 @@ describe('Outbox', () => {
 
     expect(await box.count()).toBe(1)
   })
+
+  it('reports skipped entries so a lost message is not silent', async () => {
+    // A parked file that cannot be parsed is a report the user will never get.
+    // Skipping it without a word is indistinguishable from "nothing was parked",
+    // which is precisely the confusion this outbox exists to remove.
+    const box = new Outbox(dir)
+    const seen: string[][] = []
+    box.onSkip = (names) => seen.push(names)
+    await box.park({ toUserId: 'u1', text: 'keep me', reason: 'NEEDS_INBOUND' })
+    await writeFile(join(dir, 'outbox', '9999999999999-9999.json'), '{ not json', 'utf8')
+
+    await box.list()
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toEqual(['9999999999999-9999.json'])
+  })
+
+  it('leaves no temp file behind after a park', async () => {
+    // park() writes to a `.tmp` sibling and renames, so a kill mid-write cannot
+    // leave a truncated `.json` that list() would skip forever. A stray `.tmp`
+    // after a clean park would mean the rename never happened.
+    const box = new Outbox(dir)
+    const parked = await box.park({ toUserId: 'u1', text: 'hello', reason: 'NEEDS_INBOUND' })
+
+    const { readdir } = await import('node:fs/promises')
+    const names = await readdir(join(dir, 'outbox'))
+    expect(names).toEqual([`${parked.id}.json`])
+  })
+
+  it('does not count a leftover temp file as pending', async () => {
+    const box = new Outbox(dir)
+    await box.park({ toUserId: 'u1', text: 'keep me', reason: 'NEEDS_INBOUND' })
+    await writeFile(join(dir, 'outbox', '9999999999999-9999.json.tmp'), '{"partial":', 'utf8')
+
+    expect(await box.count()).toBe(1)
+  })
 })

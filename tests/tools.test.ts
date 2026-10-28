@@ -28,6 +28,7 @@ function harness(deps: Parameters<typeof registerTools>[1]) {
 
 const noopDeps = {
   push: vi.fn(async () => ({ ok: true, retries: 0, shouldPark: false })),
+  park: vi.fn(async () => ({ id: 'parked-1' })),
   resolveContextToken: () => 'ctx',
   defaultUserId: () => 'owner',
 }
@@ -128,5 +129,37 @@ describe('weixin_push output', () => {
     expect(value.ok).toBe(false)
     expect(value.errorCode).toBe('NEEDS_INBOUND')
     expect(value.parked).toBe(false)
+  })
+
+  it('actually parks when no context token is cached', async () => {
+    // The regression this guards: the branch returned `parked: true` without
+    // writing anything to the outbox, so the agent believed the report was
+    // queued for replay while it had been discarded — the silent-loss shape of
+    // the 2026-09 incident. `parked: true` must mean a file exists.
+    const park = vi.fn(async () => ({ id: 'parked-1' }))
+    const push = vi.fn(async () => ({ ok: true, retries: 0, shouldPark: false }))
+    const deps = {
+      ...noopDeps,
+      push,
+      park,
+      resolveContextToken: () => undefined,
+      status: async () => ({ loggedIn: true, outboxCount: 0, pendingMessages: 0 }),
+    }
+    const { byName } = harness(deps)
+
+    const value = (await byName('weixin_push').execute({ text: 'morning brief' })) as Record<string, unknown>
+
+    expect(value.ok).toBe(false)
+    expect(value.parked).toBe(true)
+    expect(value.errorCode).toBe('NEEDS_INBOUND')
+    expect(park).toHaveBeenCalledTimes(1)
+    expect(park).toHaveBeenCalledWith({
+      toUserId: 'owner',
+      text: 'morning brief',
+      reason: 'NEEDS_INBOUND',
+    })
+    // A parked message must not also be handed to the send path: no token means
+    // sendText would throw and the entry would be written twice.
+    expect(push).not.toHaveBeenCalled()
   })
 })

@@ -13,6 +13,8 @@ export interface StatusReport {
 
 export interface ToolDeps {
   push: (target: PushTarget) => Promise<PushOutcome>
+  /** Write a message to the outbox so it is replayed once a token exists. */
+  park: (entry: { toUserId: string; text: string; reason: string }) => Promise<unknown>
   resolveContextToken: (userId: string) => string | undefined
   defaultUserId: () => string | undefined
   status: () => Promise<StatusReport>
@@ -66,12 +68,18 @@ export function registerTools(ctx: Context, deps: ToolDeps): void {
 
         const contextToken = deps.resolveContextToken(toUserId)
         if (contextToken === undefined) {
+          // Park for real. Returning `parked: true` without writing to the
+          // outbox would tell the agent the message is queued for replay while
+          // actually dropping it — the caller then reports success and nobody
+          // ever looks again. The outbox is the only place a parked message
+          // survives, so the push path has to go through it.
+          await deps.park({ toUserId, text: args.text, reason: 'NEEDS_INBOUND' })
           return {
             ok: false,
             retries: 0,
             parked: true,
             errorCode: 'NEEDS_INBOUND',
-            reason: 'No cached context token for this recipient yet.',
+            reason: 'No cached context token for this recipient yet; message parked until one arrives.',
           }
         }
 

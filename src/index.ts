@@ -35,6 +35,8 @@ export default class WeixinLink extends Service {
   private readonly receipts: ReceiptStore
   private readonly outbox: Outbox
   private pollBuf = ''
+  /** Disambiguates failure receipt ids that would otherwise collide within a millisecond. */
+  private failureSeq = 0
   private readonly log: ReturnType<Context['logger']>
 
   constructor(ctx: Context, public config: Config) {
@@ -44,6 +46,9 @@ export default class WeixinLink extends Service {
     this.contextTokens = new ContextTokenStore(this.dataDir)
     this.receipts = new ReceiptStore(join(this.dataDir, 'receipts'))
     this.outbox = new Outbox(this.dataDir)
+    this.outbox.onSkip = (names) => {
+      this.log.warn('outbox entries unreadable and never replayed: %s', names.join(', '))
+    }
 
     ctx.effect(() => {
       let disposed = false
@@ -77,6 +82,7 @@ export default class WeixinLink extends Service {
       await this.contextTokens.load()
       registerTools(this.ctx, {
         push: (target) => this.push(target),
+        park: (entry) => this.outbox.park(entry),
         resolveContextToken: (userId) => this.contextTokens.get(userId),
         defaultUserId: () => this.defaultUserId(),
         status: () => this.status(),
@@ -89,6 +95,7 @@ export default class WeixinLink extends Service {
 
     registerTools(this.ctx, {
       push: (target) => this.push(target),
+      park: (entry) => this.outbox.park(entry),
       resolveContextToken: (userId) => this.contextTokens.get(userId),
       defaultUserId: () => this.defaultUserId(),
       status: () => this.status(),
@@ -200,19 +207,40 @@ export default class WeixinLink extends Service {
   }
 
   private async replayOutbox(): Promise<void> {
+    // Each replayed message is already in the outbox. `push()` parks on failure
+    // so that a *new* message survives a dead token, but re-parking a replayed
+    // entry would write a second file for the same text: one failed replay
+    // doubles the outbox, and when the token finally works every copy is sent.
+    // So replay suppresses parking and owns the entry's fate itself.
     for (const { id, target } of await this.pendingTargets()) {
-      const outcome = await this.push(target)
-      if (outcome.ok) await this.outbox.markSent(id)
+      try {
+        const outcome = await this.push(target, { parkOnFailure: false })
+        // Drop the entry on success, and also on a permanent failure that will
+        // never succeed — otherwise a single unsendable message is retried
+        // forever and grows the outbox on every inbound.
+        if (outcome.ok) {
+          await this.outbox.markSent(id)
+        } else if (outcome.errorCode !== undefined && outcome.errorCode !== 'NEEDS_INBOUND' && outcome.errorCode !== 'RATE_LIMITED') {
+          await this.outbox.markSent(id)
+        }
+      } catch (error) {
+        // One unsendable entry must not abort the rest of the batch, and must
+        // not stop the inbound messages in this poll round from being routed.
+        this.log.warn('outbox replay failed for %s: %s', id, String(error))
+      }
     }
   }
 
-  async push(target: PushTarget): Promise<PushOutcome> {
+  async push(target: PushTarget, options?: { parkOnFailure?: boolean }): Promise<PushOutcome> {
+    const parkOnFailure = options?.parkOnFailure ?? true
     const client = this.client
     if (client === undefined) {
       // Not configured, reported as an ordinary failed outcome. Throwing here
       // would abort the agent turn that called the tool; the message is parked so
       // it is delivered once a credential is provided and an inbound token exists.
-      await this.outbox.park({ toUserId: target.toUserId, text: target.text, reason: 'NO_CREDENTIAL' })
+      if (parkOnFailure) {
+        await this.outbox.park({ toUserId: target.toUserId, text: target.text, reason: 'NO_CREDENTIAL' })
+      }
       await this.receipts.append({
         id: `fail-${Date.now()}`,
         ok: false,
@@ -233,7 +261,7 @@ export default class WeixinLink extends Service {
       },
     })
 
-    if (outcome.shouldPark) {
+    if (outcome.shouldPark && parkOnFailure) {
       await this.outbox.park({
         toUserId: target.toUserId,
         text: target.text,
@@ -241,8 +269,11 @@ export default class WeixinLink extends Service {
       })
     }
 
+    // Failure ids must be unique per attempt: two failures in the same
+    // millisecond would otherwise share `fail-<ts>` and read as one record to
+    // anything that keys receipts by id.
     await this.receipts.append({
-      id: outcome.msgid !== undefined && outcome.msgid !== '' ? outcome.msgid : `fail-${Date.now()}`,
+      id: outcome.msgid !== undefined && outcome.msgid !== '' ? outcome.msgid : `fail-${Date.now()}-${this.failureSeq++}`,
       ok: outcome.ok,
       ts: new Date().toISOString(),
       len: target.text.length,
