@@ -1,5 +1,7 @@
 # @ruqinhu/dsh-weixin-link
 
+English | [中文](README.zh-CN.md)
+
 Weixin (WeChat) iLink channel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) —
 send, receive, and **deliver turn results automatically**.
 
@@ -172,4 +174,4 @@ all three must be handled.
 
 ## License
 
-MIT
+[MIT](LICENSE)

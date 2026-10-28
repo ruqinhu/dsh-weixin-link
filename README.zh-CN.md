@@ -1,5 +1,7 @@
 # @ruqinhu/dsh-weixin-link
 
+[English](README.md) | 中文
+
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的微信 iLink 通道：收发消息，并**自动投递**回合结果。
 
 DSH 没有内置 IM 投递。本插件补上两件事：
@@ -138,4 +140,4 @@ skip session=... turn=13 reason=source-not-deliverable
 
 ## 许可
 
-MIT
+[MIT](LICENSE)
