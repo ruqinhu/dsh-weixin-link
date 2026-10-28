@@ -19,9 +19,10 @@ export interface ParkInput {
 /**
  * Holds messages that could not be delivered.
  *
- * A stale `context_token` is the common cause, and it resolves itself: the next
- * inbound message carries a fresh token, which is why parked messages are
- * replayed at that moment rather than retried on a timer.
+ * A missing or stale `context_token` is the common cause. It resolves in one of
+ * two ways, and both are now handled: a fresh inbound message carries a new token,
+ * and the replay loop also retries every few minutes on its own so a parked report
+ * does not depend on the owner happening to speak.
  */
 export class Outbox {
   private readonly pendingDir: string
