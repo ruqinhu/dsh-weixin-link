@@ -106,7 +106,10 @@ export class TurnTracker {
     // `turn/start` opens a turn and `turn/end` closes it. Recorded before the switch
     // so an untagged `user/message` in the same batch is attributed correctly.
     const tagged = turnOf(event.data)
-    if (event.type === 'turn/start' && tagged !== undefined) this.openTurn.set(sessionId, tagged)
+    if (event.type === 'turn/start' && tagged !== undefined) {
+      this.openTurn.set(sessionId, tagged)
+      this.evictOpenTurns()
+    }
 
     // `user/message` is the one event that never carries a turn number. Everything
     // else must, and is dropped when it does not: guessing would attach a message to
@@ -222,6 +225,24 @@ export class TurnTracker {
       const oldest = this.sessions.keys().next()
       if (oldest.done === true) return
       this.sessions.delete(oldest.value)
+      this.openTurn.delete(oldest.value)
+    }
+  }
+
+  /**
+   * Bound the open-turn map independently of the session map.
+   *
+   * A turn that never ends — the process was killed mid-turn, or `turn/end` was lost —
+   * leaves its session's entry behind forever. `openTurn` is not written by
+   * `evictSessions` (it only has an entry per session that currently has a turn open),
+   * so without this cap a long-lived process over many sessions would keep one stale
+   * entry each, and a later untagged `user/message` could be attributed to a turn that
+   * ended days ago.
+   */
+  private evictOpenTurns(): void {
+    while (this.openTurn.size > this.maxSessions) {
+      const oldest = this.openTurn.keys().next()
+      if (oldest.done === true) return
       this.openTurn.delete(oldest.value)
     }
   }

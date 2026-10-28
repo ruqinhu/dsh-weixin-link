@@ -134,6 +134,20 @@ describe('empty turns', () => {
     expect(decide(summary({ lastText: `  ${SILENT_MARKER}\n` })).action).toBe('skip')
   })
 
+  it.each([
+    ['backticks', `\`${SILENT_MARKER}\``],
+    ['code fence', `\`\`\`\n${SILENT_MARKER}\n\`\`\``],
+    ['trailing full stop', `${SILENT_MARKER}。`],
+    ['quotes', `「${SILENT_MARKER}」`],
+    ['exclamation', `${SILENT_MARKER}!`],
+    ['all of it', `\`\`\`\n「${SILENT_MARKER}」。\n\`\`\``],
+  ])('recognises the opt-out marker wrapped in %s', (_label, text) => {
+    // A model told to output exactly [SILENT] wraps it in backticks or adds punctuation
+    // often enough that strict equality would turn intentional silence into a 01:30
+    // "本次无产出" push — the very outcome the marker exists to prevent.
+    expect(decide(summary({ lastText: text }))).toEqual({ action: 'skip', reason: 'deliberately-silent' })
+  })
+
   it('still delivers real text that merely mentions the marker', () => {
     // Only a turn whose entire text is the marker opts out; a report explaining that
     // something was skipped must not be swallowed.

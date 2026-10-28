@@ -221,6 +221,22 @@ describe('TurnTracker', () => {
     expect(tracker.take('s1', 1)?.firstUserSource).toBeUndefined()
   })
 
+  it('does not let openTurn grow past the session cap', () => {
+    // A turn that never ends (process killed mid-turn, or a lost turn/end) leaves its
+    // session's open marker behind. Without a cap, a long-lived process accumulates one
+    // stale entry per abandoned session, and a later untagged user/message could be
+    // attributed to a turn that ended days ago.
+    const tracker = new TurnTracker({ maxTurnsPerSession: 4, maxSessions: 2 })
+    for (const session of ['s1', 's2', 's3', 's4']) {
+      tracker.observe(session, event('turn/start', { turn: 1 }))
+    }
+    // Only the two most recent sessions still have an open turn; the older ones fall
+    // back to "no source" instead of borrowing a stale turn number.
+    tracker.observe('s1', event('user/message', { source: { kind: 'weixin-link' } }))
+
+    expect(tracker.take('s1', 1)).toBeUndefined()
+  })
+
   it('stops attributing to a turn once it has ended', () => {
     const tracker = new TurnTracker()
     tracker.observe('s1', event('turn/start', { turn: 1 }))

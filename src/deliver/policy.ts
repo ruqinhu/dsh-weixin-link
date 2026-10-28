@@ -62,6 +62,27 @@ export const EMPTY_TURN_NOTICE = '本次无产出'
  */
 export const SILENT_MARKER = '[SILENT]'
 
+/**
+ * Recognise a silent turn tolerantly.
+ *
+ * A model told to output exactly `[SILENT]` will sometimes wrap it in backticks, add a
+ * trailing full stop, or put it inside a code fence — all of which mean the same thing
+ * to a human. Being strict here does not make delivery safer; it turns an intentional
+ * "nothing to report" into "本次无产出" at 01:30 on a Saturday, which is the exact
+ * outcome the marker exists to prevent.
+ *
+ * Tolerant about shape, strict about meaning: the marker must be the whole message.
+ * A report that merely contains the token is still delivered.
+ */
+export function isSilentText(text: string): boolean {
+  const stripped = text
+    .replace(/```[a-z]*\s*/gi, '')
+    .replace(/[`"'「」『』]/g, '')
+    .replace(/[。.!！…\s]+$/u, '')
+    .trim()
+  return stripped === SILENT_MARKER
+}
+
 export function isDeliverableSource(kind: string | undefined): boolean {
   return kind !== undefined && DELIVERABLE_SOURCES.has(kind)
 }
@@ -137,8 +158,8 @@ export function decide(summary: TurnSummary, now: Date = new Date(), offsetHours
   if (summary.pushedManually) return { action: 'skip', reason: 'already-pushed' }
 
   const text = summary.lastText.trim()
-  // A prompt opts out of delivery by ending with the silent marker; see SILENT_MARKER.
-  if (text === SILENT_MARKER) return { action: 'skip', reason: 'deliberately-silent' }
+  // A prompt opts out of delivery by ending with the silent marker; see isSilentText.
+  if (isSilentText(text)) return { action: 'skip', reason: 'deliberately-silent' }
 
   if (text === '') {
     return { action: 'send', text: formatEmptyNotice(now, offsetHours) }
