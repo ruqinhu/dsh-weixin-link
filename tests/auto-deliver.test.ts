@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AutoDeliver } from '../src/deliver/auto-deliver.js'
+import { DeliveryDedupe } from '../src/delivery/dedupe.js'
 import type { PushTarget } from '../src/delivery/push.js'
 
 interface Harness {
@@ -18,6 +19,8 @@ function harness(
     /** Simulate "no inbound message ever arrived", which means no context_token. */
     noTarget?: boolean
     timeZoneOffset?: number
+    dedupe?: DeliveryDedupe
+    notifyFailures?: boolean
   } = {},
 ): Harness {
   const push = vi.fn(async (_target: PushTarget) => options.pushResult ?? { ok: true, msgid: 'm1', retries: 0 })
@@ -29,6 +32,8 @@ function harness(
     push: push as never,
     log: { warn: vi.fn(), info: vi.fn() },
     timeZoneOffset: options.timeZoneOffset,
+    dedupe: options.dedupe,
+    notifyFailures: options.notifyFailures,
   })
 
   let handler: ((sessionId: string, event: unknown) => void) | undefined
@@ -118,14 +123,56 @@ describe('AutoDeliver', () => {
     expect(h.push).not.toHaveBeenCalled()
   })
 
-  it('does not send a turn that was aborted', async () => {
+  it('replaces an aborted turn’s partial text with a failure notice', async () => {
+    // The partial text must not go out — it is a fragment of an answer. What must go
+    // out is the fact that the turn died, because otherwise the only evidence on the
+    // phone is silence.
     const h = harness()
     h.emit('s1', userMessage(1, 'schedule'))
     h.emit('s1', textMessage(1, 'partial'))
     h.emit('s1', turnEnd(1, 'aborted'))
     await h.settle()
 
+    expect(h.push).toHaveBeenCalledTimes(1)
+    const text = String(h.push.mock.calls[0]?.[0]?.text)
+    expect(text).toContain('aborted')
+    expect(text).not.toContain('partial')
+  })
+
+  it('sends at most one failure notice per session per cooldown', async () => {
+    // A task failing in a retry loop would otherwise page the owner on every attempt
+    // and train them to mute the channel.
+    const h = harness()
+    for (const turn of [1, 2]) {
+      h.emit('s1', userMessage(turn, 'schedule'))
+      h.emit('s1', turnEnd(turn, 'errored'))
+      await h.settle()
+    }
+
+    expect(h.push).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays silent about failures when configured to', async () => {
+    const h = harness({ notifyFailures: false })
+    h.emit('s1', userMessage(1, 'schedule'))
+    h.emit('s1', turnEnd(1, 'errored'))
+    await h.settle()
+
     expect(h.push).not.toHaveBeenCalled()
+  })
+
+  it('does not send the same text twice inside the dedupe window', async () => {
+    // Automatic delivery and outbox replay are independent senders; both firing for
+    // the same report means two notifications for one event.
+    const h = harness({ dedupe: new DeliveryDedupe({ windowMs: 60_000 }) })
+    for (const turn of [1, 2]) {
+      h.emit('s1', userMessage(turn, 'schedule'))
+      h.emit('s1', textMessage(turn, 'identical report'))
+      h.emit('s1', turnEnd(turn))
+      await h.settle()
+    }
+
+    expect(h.push).toHaveBeenCalledTimes(1)
   })
 
   it('sends the empty notice when a scheduled turn produced no text', async () => {

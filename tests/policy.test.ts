@@ -24,11 +24,11 @@ function summary(over: Partial<TurnSummary> = {}): TurnSummary {
 
 describe('deliverable sources', () => {
   it('delivers a scheduled task', () => {
-    expect(decide(summary({ firstUserSource: 'schedule' }))).toEqual({ action: 'send', text: 'report body' })
+    expect(decide(summary({ firstUserSource: 'schedule' }))).toEqual({ action: 'send', kind: 'turn', text: 'report body' })
   })
 
   it('delivers a conversation that started in Weixin', () => {
-    expect(decide(summary({ firstUserSource: 'weixin-link' }))).toEqual({ action: 'send', text: 'report body' })
+    expect(decide(summary({ firstUserSource: 'weixin-link' }))).toEqual({ action: 'send', kind: 'turn', text: 'report body' })
   })
 
   it('does not deliver a turn typed in the terminal or web UI', () => {
@@ -59,12 +59,44 @@ describe('deliverable sources', () => {
 })
 
 describe('turn completion', () => {
-  it.each(['aborted', 'errored', 'canceled', 'failed'])('does not deliver a turn that ended %s', (reason) => {
-    expect(decide(summary({ reason }))).toEqual({ action: 'skip', reason: 'not-completed' })
+  it.each(['aborted', 'errored', 'canceled', 'failed'])(
+    'reports a turn that ended %s instead of staying silent',
+    (reason) => {
+      // The failure this guards against is not "the error was sent" — it is that a
+      // crashed 07:00 task produced nothing at all, which from the phone is
+      // indistinguishable from a day with no schedule. The notice names the reason
+      // and carries no model output, so it cannot be mistaken for a report.
+      const decision = decide(summary({ reason }), new Date('2026-11-02T07:00:00Z'))
+      expect(decision).toMatchObject({ action: 'send', kind: 'failure' })
+      if (decision.action !== 'send') throw new Error('unreachable')
+      expect(decision.text).toContain(reason)
+      expect(decision.text).toContain('⚠️')
+      expect(decision.text).not.toContain('report body')
+    },
+  )
+
+  it('reports a turn that never ended', () => {
+    // A turn still open at `turn/end` has no terminal reason; calling it `unknown`
+    // is honest, and silence is what this path exists to end.
+    const decision = decide(summary({ reason: undefined }), new Date('2026-11-02T07:00:00Z'))
+    expect(decision).toMatchObject({ action: 'send', kind: 'failure' })
+    if (decision.action !== 'send') throw new Error('unreachable')
+    expect(decision.text).toContain('unknown')
   })
 
-  it('does not deliver a turn that never ended', () => {
-    expect(decide(summary({ reason: undefined }))).toEqual({ action: 'skip', reason: 'not-completed' })
+  it('can be told to stay silent about failures', () => {
+    expect(decide(summary({ reason: 'errored' }), new Date(), 8, false)).toEqual({
+      action: 'skip',
+      reason: 'not-completed',
+    })
+  })
+
+  it('does not report a failure the turn already pushed itself', () => {
+    // A failing turn that pushed its own partial result must not also produce a
+    // notice claiming nothing was delivered.
+    expect(
+      decide(summary({ reason: 'errored', pushedManually: true }), new Date(), 8, true),
+    ).toEqual({ action: 'skip', reason: 'already-pushed' })
   })
 
   it('delivers when the turn completed', () => {
@@ -117,7 +149,7 @@ describe('empty turns', () => {
   })
 
   it('passes text through unchanged when present', () => {
-    expect(decide(summary({ lastText: '  padded  ' }))).toEqual({ action: 'send', text: '  padded  ' })
+    expect(decide(summary({ lastText: '  padded  ' }))).toEqual({ action: 'send', kind: 'turn', text: '  padded  ' })
   })
 
   it('honours an explicit opt-out marker instead of notifying', () => {
@@ -152,7 +184,7 @@ describe('empty turns', () => {
     // Only a turn whose entire text is the marker opts out; a report explaining that
     // something was skipped must not be swallowed.
     const text = `今日休市 ${SILENT_MARKER} 但已归档`
-    expect(decide(summary({ lastText: text }))).toEqual({ action: 'send', text })
+    expect(decide(summary({ lastText: text }))).toEqual({ action: 'send', kind: 'turn', text })
   })
 })
 

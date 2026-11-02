@@ -93,9 +93,10 @@ export type SkipReason =
   | 'not-completed'
   | 'already-pushed'
   | 'deliberately-silent'
+  | 'failure-notice-rate-limited'
 
 export type Decision =
-  | { action: 'send'; text: string }
+  | { action: 'send'; text: string; kind: 'turn' | 'failure' }
   | { action: 'skip'; reason: SkipReason }
 
 /**
@@ -110,12 +111,35 @@ export type Decision =
  * is testable; production passes the configured time zone offset.
  */
 export function formatEmptyNotice(at: Date, offsetHours: number): string {
+  return `${EMPTY_TURN_NOTICE}（${localStamp(at, offsetHours)}）`
+}
+
+/**
+ * The notice for a turn that ended without completing.
+ *
+ * This is the other half of the empty-turn rule. A turn that produced no text is
+ * announced because silence cannot be told apart from a crash; a turn that *ended
+ * in* a crash used to be dropped entirely — which made the two failures that
+ * matter most look identical to "no task was scheduled". A short notice naming the
+ * terminal reason costs one message and answers that question.
+ *
+ * It deliberately carries no model output. The earlier failure this plugin was
+ * built against was an error being pasted in as if it were the report; a notice
+ * that says only "this turn did not finish" cannot repeat that mistake.
+ */
+export const FAILURE_NOTICE_PREFIX = '⚠️ 回合未完成'
+
+export function formatFailureNotice(reason: string, at: Date, offsetHours: number): string {
+  return `${FAILURE_NOTICE_PREFIX}（${reason}，${localStamp(at, offsetHours)}）：本次没有可投递的内容。`
+}
+
+/** `YYYY-MM-DD HH:mm` in the operator's zone, shifted from UTC. */
+function localStamp(at: Date, offsetHours: number): string {
   const shifted = new Date(at.getTime() + offsetHours * 60 * 60 * 1000)
   const pad = (value: number) => String(value).padStart(2, '0')
-  const stamp = `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ${pad(
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ${pad(
     shifted.getUTCHours(),
   )}:${pad(shifted.getUTCMinutes())}`
-  return `${EMPTY_TURN_NOTICE}（${stamp}）`
 }
 
 /**
@@ -144,25 +168,42 @@ export function truncateForDelivery(text: string, maxChars = MAX_DELIVERY_CHARS)
 /**
  * Decide what to do with a finished turn.
  *
- * Order is significant and pinned by tests: source first, then completion, then
- * the manual-push check. Putting the manual-push check first would let a terminal
- * turn that called the tool report `already-pushed` instead of the real reason,
- * which makes the log misleading about why nothing was sent.
+ * Order is significant and pinned by tests: source first, then the manual-push
+ * check, then completion. The manual-push check moved ahead of completion when
+ * failure notices were added: a failing turn that already pushed something itself
+ * (a partial result, an apology) must not also produce a notice claiming nothing
+ * was delivered. Putting the completion check first hid exactly that case behind
+ * `not-completed`.
  */
-export function decide(summary: TurnSummary, now: Date = new Date(), offsetHours = 8): Decision {
+export function decide(
+  summary: TurnSummary,
+  now: Date = new Date(),
+  offsetHours = 8,
+  notifyFailures = true,
+): Decision {
   if (summary.firstUserSource === undefined) return { action: 'skip', reason: 'source-unknown' }
   if (!isDeliverableSource(summary.firstUserSource)) return { action: 'skip', reason: 'source-not-deliverable' }
-  // A turn without a terminal `completed` reason was interrupted, errored, or is
-  // still running; its text is partial and must not be presented as a result.
-  if (summary.reason !== 'completed') return { action: 'skip', reason: 'not-completed' }
   if (summary.pushedManually) return { action: 'skip', reason: 'already-pushed' }
+
+  // A turn without a terminal `completed` reason was interrupted, errored, or is
+  // still running. Its text is partial and must never be presented as a result —
+  // but its silence is not allowed either, because then a crashed 07:00 report and
+  // a day with no schedule look the same from the phone.
+  if (summary.reason !== 'completed') {
+    if (!notifyFailures) return { action: 'skip', reason: 'not-completed' }
+    return {
+      action: 'send',
+      kind: 'failure',
+      text: formatFailureNotice(summary.reason ?? 'unknown', now, offsetHours),
+    }
+  }
 
   const text = summary.lastText.trim()
   // A prompt opts out of delivery by ending with the silent marker; see isSilentText.
   if (isSilentText(text)) return { action: 'skip', reason: 'deliberately-silent' }
 
   if (text === '') {
-    return { action: 'send', text: formatEmptyNotice(now, offsetHours) }
+    return { action: 'send', kind: 'turn', text: formatEmptyNotice(now, offsetHours) }
   }
-  return { action: 'send', text: truncateForDelivery(summary.lastText) }
+  return { action: 'send', kind: 'turn', text: truncateForDelivery(summary.lastText) }
 }

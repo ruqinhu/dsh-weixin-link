@@ -20,6 +20,38 @@ export interface Config {
    * what keeps the conversation alive across restarts.
    */
   sessionId: string
+  /**
+   * How often the outbox is retried, independent of inbound traffic.
+   *
+   * A parked message is usually a transient rejection that clears by itself, so the
+   * trigger is time, not a human. Five minutes is frequent enough that a brief 07:00
+   * rejection still delivers while the report is useful, and rare enough to cost
+   * nothing when the outbox is empty.
+   */
+  replayIntervalMs: number
+  /**
+   * Identical texts sent within this window are treated as already delivered.
+   *
+   * The two senders — automatic delivery and the outbox replayer — do not know
+   * about each other, and a turn replayed across a reconnect can end twice. Zero
+   * disables the guard.
+   */
+  dedupeWindowMs: number
+  /**
+   * Whether a deliverable turn that ended without completing gets a short notice.
+   *
+   * On by default: a crashed 07:00 report and a day with no schedule are otherwise
+   * identical from the phone, and they call for entirely different responses.
+   */
+  notifyTurnFailures: boolean
+  /**
+   * Watchdog interval. `0` disables the in-process watchdog.
+   *
+   * The watchdog restarts the poll loop when no round has succeeded for three
+   * client budgets — the failure mode where the process stays up and every later
+   * report is delivered into a channel that stopped listening.
+   */
+  watchdogIntervalMs: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -49,5 +81,30 @@ export const Config: Schema<Config> = Schema.object({
     .default('')
     .description(
       'Session inbound messages are routed to, resumed when cold. Empty means the first live root agent.',
+    ),
+  replayIntervalMs: Schema.number()
+    .default(5 * 60_000)
+    .description(
+      'How often parked messages are retried. Runs on its own timer, never inside the poll loop: ' +
+        'a rate-limit backoff takes minutes, and a channel that stops receiving for that long turns ' +
+        'a delivery delay into a conversation delay.',
+    ),
+  dedupeWindowMs: Schema.number()
+    .default(10 * 60_000)
+    .description(
+      'Identical texts sent within this window are treated as already delivered. Guards against ' +
+        'automatic delivery and outbox replay sending the same report twice. Zero disables it.',
+    ),
+  notifyTurnFailures: Schema.boolean()
+    .default(true)
+    .description(
+      'Send a short notice when a deliverable turn ends without completing. Without it a crashed ' +
+        'scheduled task is indistinguishable from one that never ran.',
+    ),
+  watchdogIntervalMs: Schema.number()
+    .default(60_000)
+    .description(
+      'How often to check that the poll loop is still making progress, and restart it when it is ' +
+        'not. Zero disables the watchdog.',
     ),
 })

@@ -9,6 +9,12 @@ export interface StatusReport {
   lastDelivery?: { id: string; ts: string }
   outboxCount: number
   pendingMessages: number
+  /** Milliseconds since the poll loop last completed a round. */
+  lastPollAgeMs?: number
+  /** Times the watchdog has restarted the poll loop since this process started. */
+  pollRestarts: number
+  /** Consecutive failed rounds; zero while the transport is healthy. */
+  consecutivePollFailures: number
 }
 
 export interface ToolDeps {
@@ -131,6 +137,9 @@ export function registerTools(ctx: Context, deps: ToolDeps): void {
             },
             outboxCount: { type: 'number', required: true },
             pendingMessages: { type: 'number', required: true },
+            lastPollAgeMs: { type: 'number' },
+            pollRestarts: { type: 'number', required: true },
+            consecutivePollFailures: { type: 'number', required: true },
           },
         },
         render,
@@ -157,11 +166,14 @@ function stripUndefined(report: StatusReport): StatusReport {
     loggedIn: report.loggedIn,
     outboxCount: report.outboxCount,
     pendingMessages: report.pendingMessages,
+    pollRestarts: report.pollRestarts,
+    consecutivePollFailures: report.consecutivePollFailures,
   }
   if (report.accountId !== undefined) cleaned.accountId = report.accountId
   if (report.contextTokenAgeHours !== undefined) {
     cleaned.contextTokenAgeHours = report.contextTokenAgeHours
   }
   if (report.lastDelivery !== undefined) cleaned.lastDelivery = report.lastDelivery
+  if (report.lastPollAgeMs !== undefined) cleaned.lastPollAgeMs = report.lastPollAgeMs
   return cleaned
 }

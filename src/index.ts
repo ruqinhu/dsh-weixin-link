@@ -9,6 +9,7 @@ import { IlinkClient } from './ilink/client.js'
 import { sendText } from './ilink/send.js'
 import { pollUpdates } from './ilink/updates.js'
 import { pushWithRetry, type PushOutcome, type PushTarget } from './delivery/push.js'
+import { DeliveryDedupe } from './delivery/dedupe.js'
 import { AutoDeliver } from './deliver/auto-deliver.js'
 import { Outbox } from './delivery/outbox.js'
 import { OutboxReplayer } from './delivery/outbox-replayer.js'
@@ -25,25 +26,40 @@ import {
 } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
+import { Heartbeat } from './watchdog/heartbeat.js'
+import { Watchdog } from './watchdog/watchdog.js'
 
 export const name = 'weixin-link'
 
 /** Delay before retrying a failed poll round, so a transport blip cannot spin. */
 const POLL_RETRY_MS = 5_000
 
-/**
- * How often to retry parked messages without waiting for an inbound message.
- *
- * A parked message is usually a transient rejection (`ret:-2 prepare failed`
- * clears by itself), so the right trigger is time, not a human. Five minutes is
- * frequent enough that a brief 07:00 rejection still delivers the report while it
- * is still useful, and rare enough to cost nothing when the outbox is empty.
- */
-const OUTBOX_RETRY_MS = 5 * 60_000
-
 export function expandTilde(path: string): string {
   if (path === '~') return homedir()
   return path.startsWith('~/') || path.startsWith('~\\') ? join(homedir(), path.slice(2)) : path
+}
+
+/**
+ * Sleep that a watchdog restart can cut short.
+ *
+ * A plain `setTimeout` would keep the old loop asleep for the full retry delay
+ * after it has been replaced, which is harmless in itself but makes the restarted
+ * loop's first round look delayed in traces.
+ */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve()
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    timer.unref?.()
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 export default class WeixinLink extends Service {
   // `sessionController` is required for inbound routing, not optional: cordis only
@@ -61,7 +77,14 @@ export default class WeixinLink extends Service {
   private readonly contextTokens: ContextTokenStore
   private readonly receipts: ReceiptStore
   private readonly outbox: Outbox
+  private readonly dedupe: DeliveryDedupe
+  private readonly heartbeat: Heartbeat
+  private readonly watchdog: Watchdog
   private pollBuf = ''
+  /** Aborts the running poll loop; replaced by a watchdog restart. */
+  private pollController?: AbortController
+  /** Single-flight guard so a slow replay and its timer cannot overlap. */
+  private replaying = false
   /** Disambiguates failure receipt ids that would otherwise collide within a millisecond. */
   private failureSeq = 0
   private readonly log: ReturnType<Context['logger']>
@@ -74,20 +97,56 @@ export default class WeixinLink extends Service {
     this.contextTokens = new ContextTokenStore(this.dataDir)
     this.receipts = new ReceiptStore(join(this.dataDir, 'receipts'))
     this.outbox = new Outbox(this.dataDir)
+    this.dedupe = new DeliveryDedupe({ windowMs: config.dedupeWindowMs })
+    this.heartbeat = new Heartbeat(Heartbeat.pathFor(this.dataDir))
+    this.watchdog = new Watchdog({
+      thresholds: { pollTimeoutMs: config.pollTimeoutMs },
+      read: () => ({
+        now: Date.now(),
+        startedAt: this.heartbeat.startedAtMs(),
+        lastOkAt: this.heartbeat.lastOkAtMs(),
+        consecutiveFailures: this.heartbeat.consecutiveFailures(),
+      }),
+      restart: (verdict) => {
+        this.heartbeat.markRestart()
+        this.restartPollLoop(verdict.reason)
+      },
+      persist: () => this.heartbeat.save(),
+      log: this.log,
+      trace: (line) => this.appendDeliveryTrace(line),
+    })
     this.outbox.onSkip = (names) => {
       this.log.warn('outbox entries unreadable and never replayed: %s', names.join(', '))
     }
 
     ctx.effect(() => {
       let disposed = false
+      let stopReplay: (() => void) | undefined
+      let stopWatchdog: (() => void) | undefined
+
       void (async () => {
         await this.bootstrap()
         // The fiber may have been torn down while bootstrap was awaiting.
         if (disposed) return
-        if (this.config.poll) this.startPolling()
+        if (this.config.poll) this.startPollLoop()
+        // Replay has its own timer, not a place in the poll loop: a rate-limit
+        // backoff runs for minutes, and awaiting it inside the loop means the
+        // channel receives nothing for exactly as long as a send is stuck.
+        stopReplay = this.startReplayTimer()
+        // Only watch a loop that exists: a push-only profile (or one without a
+        // credential) never polls, and a watchdog restarting a loop that was never
+        // meant to run would spend its life incrementing a counter.
+        stopWatchdog =
+          this.config.watchdogIntervalMs > 0 && this.config.poll && this.client !== undefined
+            ? this.watchdog.start(this.config.watchdogIntervalMs)
+            : undefined
       })()
+
       return () => {
         disposed = true
+        stopReplay?.()
+        stopWatchdog?.()
+        this.stopPollLoop()
       }
     })
 
@@ -110,6 +169,8 @@ export default class WeixinLink extends Service {
       // after construction, so capturing a value here would freeze `undefined`.
       resolveTarget: () => this.currentPushTarget(),
       push: (target) => this.push(target),
+      dedupe: this.dedupe,
+      notifyFailures: this.config.notifyTurnFailures,
       log: {
         // cordis' logger takes printf-style args, not a rest tuple; forwarding the
         // first two covers every message this module emits.
@@ -265,7 +326,9 @@ export default class WeixinLink extends Service {
 
     // A fresh process may find messages parked by a previous one. Replay them
     // now if a cached token still exists; otherwise they wait for an inbound.
-    await this.replayOutbox()
+    // Not awaited: bootstrap also starts the poll loop, and a replay sitting in
+    // rate-limit backoff would keep the channel deaf for minutes after boot.
+    void this.replayOnce()
   }
 
   private defaultUserId(): string | undefined {
@@ -284,65 +347,111 @@ export default class WeixinLink extends Service {
     return ready
   }
 
-  private startPolling(): void {
-    this.ctx.effect(() => {
-      let stopped = false
-      const client = this.client as IlinkClient
+  /**
+   * Start (or restart) the long-poll loop.
+   *
+   * Kept as a plain `while` behind an AbortController rather than as a cordis
+   * effect because the watchdog has to replace it at runtime. Registering a new
+   * effect per restart would leave one disposed fiber behind for every recovery,
+   * which over months is a slow leak in the one code path meant to fix leaks.
+   */
+  private startPollLoop(): void {
+    if (this.client === undefined) return
+    this.stopPollLoop()
+    const controller = new AbortController()
+    this.pollController = controller
+    void this.runPoll(controller.signal)
+  }
 
-      const loop = async (): Promise<void> => {
-        let lastReplay = Date.now()
-        while (!stopped) {
-          try {
-            const round = await pollUpdates(
-              client,
-              { getUpdatesBuf: this.pollBuf },
-              { timeoutMs: this.config.pollTimeoutMs },
-            )
-            this.pollBuf = round.nextBuf
+  private stopPollLoop(): void {
+    this.pollController?.abort()
+    this.pollController = undefined
+  }
 
-            // Retry the outbox on a timer, not only on inbound.
-            //
-            // Replaying solely when a message arrives assumes the owner will keep
-            // talking to the bot. He may not: if the 07:00 report is parked and he
-            // is asleep or busy, nothing is retried until he happens to send
-            // something — possibly the next day, long after the report mattered.
-            // The queue exists to survive a transient rejection, and a transient
-            // rejection clears on its own, so waiting for a human is the wrong
-            // trigger. This is cheap: `pendingTargets()` reads a directory that is
-            // empty in the normal case.
-            if (Date.now() - lastReplay >= OUTBOX_RETRY_MS) {
-              lastReplay = Date.now()
-              await this.replayOutbox()
-            }
+  /** Called by the watchdog. The old loop is aborted before the new one starts. */
+  private restartPollLoop(reason: string): void {
+    this.log.warn('restarting poll loop: %s', reason)
+    this.startPollLoop()
+  }
 
-            if (round.idle) continue
+  private async runPoll(signal: AbortSignal): Promise<void> {
+    const client = this.client as IlinkClient
+    while (!signal.aborted) {
+      try {
+        const round = await pollUpdates(
+          client,
+          { getUpdatesBuf: this.pollBuf },
+          { timeoutMs: this.config.pollTimeoutMs },
+        )
+        // A restart can land while a round is in flight; its result is still valid
+        // for the buffer but the loop that owns this iteration is gone.
+        if (signal.aborted) return
+        this.pollBuf = round.nextBuf
+        this.heartbeat.markRound(true)
+        // Persist per round rather than only on the watchdog tick: with the
+        // watchdog disabled there is no tick, and the heartbeat is exactly what an
+        // external observer reads when the plugin's own log is silent.
+        void this.heartbeat.save().catch(() => undefined)
 
-            const inbound = collectInbound(round.messages, {
-              echoOwnMessages: this.config.echoOwnMessages,
-            })
-            if (inbound.length === 0) continue
+        if (round.idle) continue
 
-            // Record every token before replay so a single batch can both
-            // refresh the cache and drain a backlog.
-            const now = new Date()
-            for (const message of inbound) {
-              await this.contextTokens.record(message.userId, message.contextToken, now)
-            }
-            await this.replayOutbox()
-            await this.dispatchInbound(inbound)
-          } catch (error) {
-            if (stopped) return
-            this.log.warn('poll round failed: %s', String(error))
-            await new Promise((resolve) => setTimeout(resolve, POLL_RETRY_MS))
-          }
+        const inbound = collectInbound(round.messages, {
+          echoOwnMessages: this.config.echoOwnMessages,
+        })
+        if (inbound.length === 0) continue
+
+        // Record every token before replay so a single batch can both refresh the
+        // cache and drain a backlog.
+        const now = new Date()
+        for (const message of inbound) {
+          await this.contextTokens.record(message.userId, message.contextToken, now)
         }
+        this.heartbeat.markInbound(now)
+        // Not awaited: a replay may sit in rate-limit backoff for minutes, and the
+        // owner's message must not wait behind a parked report's retries.
+        void this.replayOnce()
+        await this.dispatchInbound(inbound)
+      } catch (error) {
+        if (signal.aborted) return
+        this.heartbeat.markRound(false, new Date(), error)
+        this.log.warn('poll round failed: %s', String(error))
+        await abortableSleep(POLL_RETRY_MS, signal)
       }
+    }
+  }
 
-      void loop()
-      return () => {
-        stopped = true
-      }
-    })
+  /**
+   * Retry parked messages on a timer.
+   *
+   * Replaying only when a message arrives assumes the owner will keep talking to
+   * the bot. He may not: if the 07:00 report is parked and he is asleep, nothing is
+   * retried until he happens to send something — possibly the next day, long after
+   * the report mattered. The queue exists to survive a transient rejection, and a
+   * transient rejection clears on its own, so time is the right trigger.
+   */
+  private startReplayTimer(): () => void {
+    if (this.config.replayIntervalMs <= 0) return () => undefined
+    const interval = Math.max(1_000, this.config.replayIntervalMs)
+    const timer = setInterval(() => {
+      void this.replayOnce()
+    }, interval)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }
+
+  /** Single-flight wrapper: a replay in progress makes the next tick a no-op. */
+  private async replayOnce(): Promise<void> {
+    if (this.replaying) return
+    this.replaying = true
+    try {
+      await this.replayOutbox()
+    } catch (error) {
+      // The replayer contains its own failures per entry; this only catches wiring
+      // bugs, and a timer callback that throws would take the process down.
+      this.log.warn('outbox replay failed: %s', String(error))
+    } finally {
+      this.replaying = false
+    }
   }
 
   /**
@@ -516,6 +625,12 @@ export default class WeixinLink extends Service {
       lastDelivery: last === undefined ? undefined : { id: last.id, ts: last.ts },
       outboxCount: await this.outbox.count(),
       pendingMessages: stuck,
+      // Liveness of the receive path, not of the process. A channel whose poll loop
+      // silently stopped answering still reports `loggedIn: true` — the tokens are
+      // fine — and every later reply goes nowhere.
+      lastPollAgeMs: this.heartbeat.pollLagMs(now),
+      pollRestarts: this.heartbeat.restarts(),
+      consecutivePollFailures: this.heartbeat.consecutiveFailures(),
     }
   }
 }

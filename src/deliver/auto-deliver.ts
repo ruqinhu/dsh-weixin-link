@@ -15,8 +15,19 @@
  */
 
 import type { PushOutcome, PushTarget } from '../delivery/push.js'
+import type { DeliveryDedupe } from '../delivery/dedupe.js'
 import { decide } from './policy.js'
 import { TurnTracker, type SessionEventLike } from './turn-tracker.js'
+
+/**
+ * How long one session may go between failure notices.
+ *
+ * A task that fails in a retry loop would otherwise page the owner every time it
+ * ends. An hour is long enough that the loop is visible as a pattern rather than as
+ * one long scream, and still short enough that the next scheduled slot reports its
+ * own failure.
+ */
+export const DEFAULT_FAILURE_NOTICE_COOLDOWN_MS = 60 * 60_000
 
 /** Where a message goes once the plugin decides to send it. */
 export interface AutoDeliverTarget {
@@ -57,14 +68,29 @@ export interface AutoDeliverDeps {
    * which is exactly the question every delivery incident starts with.
    */
   trace?: (line: string) => void
+  /**
+   * The second filter level: text that already went out is not sent again.
+   *
+   * Optional because the unit tests that exercise policy in isolation have no
+   * delivery history to consult; a caller that omits it simply loses the guard.
+   */
+  dedupe?: DeliveryDedupe
+  /** Announced when a deliverable turn ends without completing. See policy. */
+  notifyFailures?: boolean
+  /** Per-session floor between failure notices. */
+  failureNoticeCooldownMs?: number
 }
 
 export class AutoDeliver {
   private readonly tracker = new TurnTracker()
   private readonly timeZoneOffset: number
+  private readonly failureNoticeCooldownMs: number
+  /** sessionId → when its last failure notice was sent. */
+  private readonly lastFailureNotice = new Map<string, number>()
 
   constructor(private readonly deps: AutoDeliverDeps) {
     this.timeZoneOffset = deps.timeZoneOffset ?? 8
+    this.failureNoticeCooldownMs = deps.failureNoticeCooldownMs ?? DEFAULT_FAILURE_NOTICE_COOLDOWN_MS
   }
 
   /**
@@ -92,19 +118,41 @@ export class AutoDeliver {
         return
       }
 
-      const decision = decide(summary, new Date(), this.timeZoneOffset)
+      const decision = decide(
+        summary,
+        new Date(),
+        this.timeZoneOffset,
+        this.deps.notifyFailures ?? true,
+      )
       if (decision.action === 'skip') {
         this.deps.log.info('auto-deliver skipped %s turn %d: %s', sessionId, turn, decision.reason)
         this.trace(`skip session=${sessionId} turn=${turn} reason=${decision.reason}`)
         return
       }
 
-      this.trace(`send session=${sessionId} turn=${turn} len=${decision.text.length}`)
+      if (decision.kind === 'failure' && this.failureNoticeCoolingDown(sessionId)) {
+        // One notice per hour per session. A task failing in a retry loop would
+        // otherwise page the owner on every attempt, and the owner's response to
+        // that is to mute the channel — which also mutes the reports that work.
+        this.trace(`skip session=${sessionId} turn=${turn} reason=failure-notice-rate-limited`)
+        return
+      }
+
+      if (this.deps.dedupe?.isDuplicate(decision.text) === true) {
+        // The second filter level: the same text is already on the phone. Replay and
+        // automatic delivery are independent senders, and a turn replayed across a
+        // reconnect can end twice.
+        this.deps.log.info('auto-deliver skipped %s turn %d: duplicate text', sessionId, turn)
+        this.trace(`skip session=${sessionId} turn=${turn} reason=duplicate`)
+        return
+      }
+
+      this.trace(`send session=${sessionId} turn=${turn} kind=${decision.kind} len=${decision.text.length}`)
       // Defer one microtask so the emitting turn finishes its own bookkeeping first;
       // pushing synchronously inside `session/event` would make delivery latency part
       // of the agent's turn, and a slow or hanging send would stall it.
       queueMicrotask(() => {
-        void this.deliver(decision.text, sessionId, turn!)
+        void this.deliver(decision.text, sessionId, turn!, decision.kind)
       })
     } catch (error) {
       this.deps.log.warn('auto-deliver observe failed: %s', String(error))
@@ -112,7 +160,22 @@ export class AutoDeliver {
     }
   }
 
-  private async deliver(text: string, sessionId: string, turn: number): Promise<void> {
+  private failureNoticeCoolingDown(sessionId: string): boolean {
+    const last = this.lastFailureNotice.get(sessionId)
+    if (last === undefined) return false
+    if (Date.now() - last >= this.failureNoticeCooldownMs) {
+      this.lastFailureNotice.delete(sessionId)
+      return false
+    }
+    return true
+  }
+
+  private async deliver(
+    text: string,
+    sessionId: string,
+    turn: number,
+    kind: 'turn' | 'failure',
+  ): Promise<void> {
     try {
       const target = this.deps.resolveTarget()
       if (target === undefined) {
@@ -126,6 +189,8 @@ export class AutoDeliver {
 
       const outcome = await this.deps.push({ toUserId: target.toUserId, contextToken: target.contextToken, text })
       if (outcome.ok) {
+        this.deps.dedupe?.record(text)
+        if (kind === 'failure') this.lastFailureNotice.set(sessionId, Date.now())
         this.deps.log.info('auto-delivered %s turn %d (%d chars)', sessionId, turn, text.length)
         this.trace(`ok session=${sessionId} turn=${turn} msgid=${String(outcome.msgid)}`)
       } else {
