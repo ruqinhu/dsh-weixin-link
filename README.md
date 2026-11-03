@@ -7,9 +7,12 @@ receives messages, and delivers turn results **without the model having to remem
 to send them**.
 
 DSH has no built-in IM delivery. This plugin adds two things — a `weixin_push` tool,
-and automatic delivery of a finished turn — and the second one is the design. The
-rest of this document is why delivery cannot be left to the model, what the channel
-refuses to do, and how the receiving path survives a send that is stuck.
+and automatic delivery of a finished turn — and the second one is the design.
+
+The rest of this document follows the constraints the way they arrived: section 1 is
+the one that decides everything, 2–8 are one mechanism each with the failure that
+motivated it, 9 is what was measured (including a real outage), 10 is what is still
+open, and the install/config reference is at the end.
 
 ## 1. The constraint that decides everything
 
@@ -20,6 +23,20 @@ So a quiet night means the 07:00 report cannot be sent until the owner speaks. T
 plugin does not pretend otherwise: such messages are parked and replayed as soon as
 a real inbound message refreshes the token. There is deliberately **no fallback
 channel** — a silent fallback hides the failure instead of exposing it.
+
+```text
+  inbound   iLink getupdates ─► context_token ─► dispatch ─► agent (session)
+                  │                              │
+                  │                              └─ no live agent? resume it via
+                  │                                 sessionController.resolveAgent()
+                  ▼
+  outbound  session/event ─► turn/end ─► policy.decide ─► dedupe ─► push ─► receipts
+                                              │                      │
+                                              │                      └─ fail ─► park
+                                              └─ skip: trace only            │
+                                                                   replay timer ─┘
+  liveness  every round ─► state/heartbeat.json ─► watchdog (60 s) ─► restart if silent
+```
 
 That single constraint explains the parking queue, the replay rules, and why a stale
 token is a first-class state rather than an error to retry.
@@ -43,9 +60,9 @@ that turn and sends it itself. `dsh-schedule` only awaits `sessions.flush()` aft
 queueing a message; it neither knows nor cares what the agent answered — so the
 channel has to do this.
 
-## 3. Which turns are delivered
+## 3. Which turns are delivered, and how many times
 
-Keyed on the `source.kind` of the turn's first `user/message`:
+**3.1 Source.** Keyed on the `source.kind` of the turn's first `user/message`:
 
 | `source.kind` | Origin | Delivered |
 | --- | --- | --- |
@@ -55,15 +72,22 @@ Keyed on the `source.kind` of the turn's first `user/message`:
 | `runtime-context` / `skill-catalog` / `time-context` | injected context | ❌ not speech |
 | `compact-checkpoint` / `provider` / `fallback` | compaction, session-title generation | ❌ internal maintenance; sending it is noise |
 
-One delivery per turn. If the model called `weixin_push` itself during that turn,
-auto-delivery stands down — otherwise the owner gets the same content twice.
+Only the *first* user message names the turn's origin: every turn is followed by
+injected context (runtime snapshot, skill catalog, time context), so reading the last
+one would classify every turn as context and deliver nothing.
 
-The hard cap is **2,200 characters** per message, enforced in code. iLink's failure
-for over-long payloads is not a clean rejection: a send can return a message id and
-still never arrive. Full reports go to the HTML page; the message carries the
-summary and, when cut, a line saying so plus the link on the first line. The cap is
-enforced rather than trusted to the model because delivery no longer consults the
-model at all.
+**3.2 Exactly once.** One delivery per turn. If the model called `weixin_push` itself
+during that turn, auto-delivery stands down — otherwise the owner gets the same
+content twice. A turn the plugin never saw open is also skipped: without the opening
+message there is no way to tell an owner-facing report from session-title generation,
+and guessing wrong either spams the phone or drops a real report.
+
+**3.3 Length.** The hard cap is **2,200 characters** per message, enforced in code.
+iLink's failure for over-long payloads is not a clean rejection: a send can return a
+message id and still never arrive. Full reports go to the HTML page; the message
+carries the summary and, when cut, a line saying so plus the link on the first line.
+The cap is enforced rather than trusted to the model because delivery no longer
+consults the model at all.
 
 ## 4. Silence is a failure mode, so it is bounded on both sides
 
@@ -72,8 +96,10 @@ Silence would make "ran and failed" indistinguishable from "never ran", and thos
 two need different responses.
 
 A prompt can opt out of that notification: when the **entire turn text is exactly
-`[SILENT]`**, delivery is skipped. Only whole-text equality counts; mentioning the
-marker inside a real report does not suppress it.
+`[SILENT]`**, delivery is skipped. Only whole-text equality counts, and it is matched
+tolerantly — a model told to emit exactly `[SILENT]` will sometimes wrap it in
+backticks or add a full stop, all of which mean the same thing to a human. A report
+that merely mentions the marker is still delivered.
 
 A deliverable turn that ends **without** `completed` — errored, aborted, canceled —
 sends `⚠️ 回合未完成（reason，timestamp）：本次没有可投递的内容。` instead of its
@@ -97,10 +123,17 @@ is longer than any retry path here and shorter than the gap between two runs of 
 same task. Successful sends are recorded in one place — the send path itself — so
 the window covers every sender, and the replayer checks it before sending.
 
-Deliberately not an LLM judgement. A per-message model call to decide "is this worth
-interrupting the owner" costs a round trip on every delivery and introduces a new
-way to be silently wrong: a classifier that says "don't send" is indistinguishable
-from a crash, which is the failure this plugin exists to prevent.
+**5.1 Why not an LLM judgement.** A per-message model call to decide "is this worth
+interrupting the owner" costs a round trip on every delivery and introduces a new way
+to be silently wrong: a classifier that says "don't send" is indistinguishable from a
+crash, which is the failure this plugin exists to prevent.
+
+**5.2 Why not batching.** Coalescing turns that finish close together into one message
+is the other obvious noise reducer, and it was rejected on the same grounds as an LLM
+gate: it delays a report whose value decays, it complicates the 2,200-character cap
+(whose overflow fails silently), and a batch that fails halfway is harder to replay
+than a single parked message. The duplicate window removes the noise that comes from
+sending the *same* text twice without touching the text that legitimately differs.
 
 ## 6. Receiving is not blocked by sending
 
@@ -138,31 +171,31 @@ watching a different process, can answer "is it alive" without grepping.
 `weixin_status` reports it as `lastPollAgeMs`, `pollRestarts`, and
 `consecutivePollFailures`.
 
-## 8. Send policy and replay
+## 8. Send policy, parking, and replay
 
-Auto-delivery and `weixin_push` share one send path:
+**8.1 The send path.** Auto-delivery and `weixin_push` share one path:
 
 1. Try once.
 2. Classify the failure:
-   - **stale token** → park, do not retry (only a new inbound message helps)
-   - **rate limited** → back off 30 s, 60 s, 120 s; if still limited, **park**
-   - **anything else** → one immediate retry, then give up
+
+| Class | Action | Why not the alternative |
+| --- | --- | --- |
+| stale token | park, do not retry | only a new inbound message can mint a token |
+| rate limited | back off 30/60/120 s, then park | dropping after the ladder looks like "never scheduled" |
+| anything else | one immediate retry, then give up | more retries turn a blip into a queue stall |
+
 3. Write one JSONL receipt per attempt.
 
-Parking on exhausted rate limiting is not incidental. A report that exhausts the
-backoff ladder and is then dropped looks identical to one that was never scheduled —
-the failure mode that once swallowed a whole morning report.
+The one exception: auto-delivery that finds **no `context_token` at all** (no inbound
+message ever received) does not park. Replaying a week-old report is worse than
+dropping it.
 
-The one exception: auto-delivery that finds **no `context_token` at all** (no
-inbound message ever received) does not park. Replaying a week-old report is worse
-than dropping it.
-
-Replay has one rule, and it too was paid for: **an entry is deleted only when the
-failure is provably permanent.** Everything else is kept. An earlier implementation
-treated "neither `NEEDS_INBOUND` nor `RATE_LIMITED`" as permanent, but the failure
-that actually happens here is `ret:-2 prepare failed`, classified `UNKNOWN` — which
-is transient. A 12:40 noon report was deleted by that rule: the receipt said
-`ok:false` and the outbox was already empty.
+**8.2 Replay.** Replay has one rule, and it too was paid for: **an entry is deleted
+only when the failure is provably permanent.** Everything else is kept. An earlier
+implementation treated "neither `NEEDS_INBOUND` nor `RATE_LIMITED`" as permanent, but
+the failure that actually happens here is `ret:-2 prepare failed`, classified
+`UNKNOWN` — which is transient. A 12:40 noon report was deleted by that rule: the
+receipt said `ok:false` and the outbox was already empty.
 
 A replayed entry is never re-parked on failure; it is already in the outbox, and a
 second file for the same text means every copy is sent once the token recovers.
@@ -170,17 +203,29 @@ second file for the same text means every copy is sent once the token recovers.
 ## 9. What we measured
 
 - **Unit tests**: 248 across 21 files — the decision matrix, the turn tracker, the
-  outbox rules, the dedupe window, the heartbeat and the watchdog each have their
-  own tests; `tsc --noEmit` is clean.
-- **Failure notices in production**: the trace shows the switch — three consecutive
-  `skip … reason=not-completed` while a quota outage lasted, then
-  `send … kind=failure len=44` followed by `ok … msgid=7522972414050248000`.
+  outbox rules, the dedupe window, the heartbeat and the watchdog each have their own
+  tests; `tsc --noEmit` is clean.
 - **Delivery round trip**: an inbound message at 10:00:04 refreshed the token, the
   turn completed at 10:00:24, and the reply was delivered in the same second
   (`ok msgid=7523202391886746000`).
-- **Watchdog**: heartbeat advances every round, `restarts: 0` after a full day, and
-  a stopped loop is restarted by the same tick that would otherwise have stayed
-  silent.
+- **Watchdog**: heartbeat advances every round, `restarts: 0` across a 14-hour run, and a
+  stopped loop is restarted by the tick that would otherwise have stayed silent.
+
+**9.1 An outage, as the trace recorded it.** During a quota outage the model answered
+with `429 AccountQuotaExceeded`. The old build skipped those turns silently; the new
+build names them. Same agent, same channel, two consecutive builds:
+
+```text
+10:40:29Z skip session=… turn=304 reason=not-completed     ← old build
+10:42:31Z skip session=… turn=305 reason=not-completed
+10:44:34Z skip session=… turn=306 reason=not-completed
+10:46:33Z send session=… turn=307 kind=failure len=44      ← new build
+10:46:33Z ok   session=… turn=307 msgid=7522972414050248000
+```
+
+Four minutes of silence became one line on the phone that says the run did not
+finish. The rate limiter then held the next notices back — visible in the same trace
+as `skip … reason=failure-notice-rate-limited` — which is the behaviour §4 describes.
 
 ## 10. Open questions
 
@@ -195,6 +240,20 @@ second file for the same text means every copy is sent once the token recovers.
   notice. Persisting it costs a file write per failure to suppress one message.
 - **No media, no rich cards.** Text only, because the 2,200-character cap and the
   silent-drop failure mode make text the only payload whose failure is observable.
+- **The watchdog cannot tell "hung" from "the process is paused".** A debugger or a
+  long GC pause looks like a stall; the restart is harmless but it will be recorded.
+- **Nothing validates the outbox at write time.** Corrupt entries are skipped on read
+  and reported through the logger, not repaired.
+
+## Compatibility
+
+| Item | Value |
+| --- | --- |
+| DSH | `0.2.1-rc.5` (peer dependencies pinned to it) |
+| Runtime | Node 22+; no native modules |
+| Runtime dependencies | none beyond DSH itself |
+| Required services | `tools`, `credentials`, `sessionController`; `agents` optional |
+| Payload | text only, ≤ 2,200 characters |
 
 ## Install
 
