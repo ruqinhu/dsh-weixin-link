@@ -29,7 +29,10 @@ interface Harness {
 function harness(
   entries: ReplayTarget[],
   respond: (text: string) => Promise<PushOutcome>,
-  options: { isPermanent?: (code: string | undefined) => boolean } = {},
+  options: {
+    isPermanent?: (code: string | undefined) => boolean
+    shouldSkip?: (target: ReplayTarget['target']) => boolean
+  } = {},
 ): Harness {
   const marked: string[] = []
   const pushed: string[] = []
@@ -50,6 +53,7 @@ function harness(
       return 0
     },
     isPermanentlyUnsendable: options.isPermanent ?? (() => false),
+    ...(options.shouldSkip === undefined ? {} : { shouldSkip: options.shouldSkip }),
     log: { warn: noop, debug: noop },
   })
   return {
@@ -64,6 +68,31 @@ function harness(
 }
 
 describe('OutboxReplayer', () => {
+  it('retires an entry whose text the other sender already delivered', async () => {
+    // Automatic delivery and replay are independent senders. Without this check the
+    // same report goes out twice whenever a retry beats the replay timer; with it the
+    // entry is retired because the text is on the phone, not because anything failed.
+    const h = harness([ready('a', 'same text')], async () => outcome({ ok: true, msgid: 'm1' }), {
+      shouldSkip: (target) => target.text === 'same text',
+    })
+
+    await h.replayer.replay()
+
+    expect(h.pushed).toEqual([])
+    expect(h.marked).toEqual(['a'])
+  })
+
+  it('still sends an entry the other sender has not delivered', async () => {
+    const h = harness([ready('a', 'fresh')], async () => outcome({ ok: true, msgid: 'm1' }), {
+      shouldSkip: (target) => target.text === 'other',
+    })
+
+    await h.replayer.replay()
+
+    expect(h.pushed).toEqual(['fresh'])
+    expect(h.marked).toEqual(['a'])
+  })
+
   it('sends each parked entry and retires the ones that succeed', async () => {
     const h = harness([ready('a', 'A'), ready('b', 'B')], async () => outcome({ ok: true, msgid: 'm1' }))
 

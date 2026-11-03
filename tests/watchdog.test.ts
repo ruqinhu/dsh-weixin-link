@@ -26,38 +26,42 @@ describe('assessPollHealth', () => {
 
   it('is healthy while rounds keep succeeding', () => {
     const verdict = assessPollHealth(
-      { now: startedAt + 60_000, startedAt, lastOkAt: startedAt + 30_000, consecutiveFailures: 0 },
+      { now: startedAt + 60_000, startedAt, lastRoundAt: startedAt + 30_000, consecutiveFailures: 0 },
       thresholds,
     )
 
     expect(verdict).toMatchObject({ action: 'healthy' })
   })
 
-  it('is healthy while rounds keep failing but the loop still runs', () => {
-    // Failures are not the trigger: a failing loop still backs off and retries, and
-    // restarting it would not make the network come back.
+  it('is healthy while rounds keep failing but the loop still turns', () => {
+    // The regression this pins: liveness is "a round came back", not "a round
+    // succeeded". Restarting a loop that is already backing off would abort the
+    // retry in flight, and the next tick would abort the next one — a livelock under
+    // exactly the conditions the watchdog exists to survive.
     const verdict = assessPollHealth(
-      { now: startedAt + 20_000, startedAt, lastOkAt: startedAt + 10_000, consecutiveFailures: 5 },
+      { now: startedAt + 20_000, startedAt, lastRoundAt: startedAt + 10_000, consecutiveFailures: 5 },
       thresholds,
     )
 
     expect(verdict).toMatchObject({ action: 'healthy' })
   })
 
-  it('restarts after three missed rounds', () => {
+  it('restarts a loop that stopped attempting rounds', () => {
+    // No round *attempted* for three budgets is the hung-transport case: the loop
+    // is not failing, it is gone.
     const verdict = assessPollHealth(
-      { now: startedAt + 121_000, startedAt, lastOkAt: startedAt, consecutiveFailures: 0 },
+      { now: startedAt + 121_000, startedAt, lastRoundAt: startedAt, consecutiveFailures: 0 },
       thresholds,
     )
 
     expect(verdict).toMatchObject({ action: 'restart', reason: 'stalled' })
   })
 
-  it('names a loop that never succeeded as never-polled', () => {
+  it('names a loop that never attempted a round as never-polled', () => {
     // The two cases lead to different investigations: a loop that never started
     // usually means configuration or credentials, a stalled one means transport.
     const verdict = assessPollHealth(
-      { now: startedAt + 300_000, startedAt, lastOkAt: undefined, consecutiveFailures: 0 },
+      { now: startedAt + 300_000, startedAt, lastRoundAt: undefined, consecutiveFailures: 0 },
       thresholds,
     )
 
@@ -66,7 +70,10 @@ describe('assessPollHealth', () => {
 
   it('does not restart a fresh process', () => {
     expect(
-      assessPollHealth({ now: startedAt + 10_000, startedAt, lastOkAt: undefined, consecutiveFailures: 0 }, thresholds),
+      assessPollHealth(
+        { now: startedAt + 10_000, startedAt, lastRoundAt: undefined, consecutiveFailures: 0 },
+        thresholds,
+      ),
     ).toMatchObject({ action: 'healthy' })
   })
 })
@@ -80,7 +87,7 @@ describe('Watchdog', () => {
     const lagMs = options.lagMs ?? 0
     const watchdog = new Watchdog({
       thresholds,
-      read: () => ({ now: lagMs + 1, startedAt: -1, lastOkAt: 0, consecutiveFailures: 0 }),
+      read: () => ({ now: lagMs + 1, startedAt: -1, lastRoundAt: 0, consecutiveFailures: 0 }),
       restart,
       persist,
       log: { warn: vi.fn() },
@@ -113,7 +120,7 @@ describe('Watchdog', () => {
     })
     const watchdog = new Watchdog({
       thresholds,
-      read: () => ({ now: 500_000, startedAt: -1, lastOkAt: 0, consecutiveFailures: 0 }),
+      read: () => ({ now: 500_000, startedAt: -1, lastRoundAt: 0, consecutiveFailures: 0 }),
       restart,
       persist: async () => undefined,
       log: { warn: vi.fn() },

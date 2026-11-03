@@ -93,7 +93,6 @@ export type SkipReason =
   | 'not-completed'
   | 'already-pushed'
   | 'deliberately-silent'
-  | 'failure-notice-rate-limited'
 
 export type Decision =
   | { action: 'send'; text: string; kind: 'turn' | 'failure' }

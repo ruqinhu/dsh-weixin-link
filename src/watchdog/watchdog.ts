@@ -18,10 +18,19 @@
 
 export interface PollHealthInput {
   now: number
-  /** When this process started polling. Used as the reference until one round succeeds. */
+  /** When this process started polling. Used as the reference until a round is attempted. */
   startedAt: number
-  /** When the last round succeeded, absent if none ever has. */
-  lastOkAt?: number
+  /**
+   * When the last round was *attempted*, success or failure.
+   *
+   * Liveness is "the loop is still turning", not "the loop is succeeding". A round
+   * that fails still proves the loop is running; a round that never returns proves
+   * it is not. That is why this is the reference and `consecutiveFailures` is not a
+   * trigger: restarting a loop that is already backing off and retrying would abort
+   * the retry, and the next tick would abort it again — a livelock under the exact
+   * conditions the watchdog is supposed to survive.
+   */
+  lastRoundAt?: number
   consecutiveFailures: number
 }
 
@@ -65,14 +74,16 @@ export function stallThresholdMs(thresholds: StallThresholds): number {
 }
 
 /**
- * Decide whether the poll loop has stopped making progress.
+ * Decide whether the poll loop has stopped moving.
  *
+ * The trigger is silence — no round *attempted* for longer than the threshold.
  * Failures are not the trigger: a loop that keeps failing is still a loop that
- * keeps running, and it already backs off and retries. The trigger is silence —
- * no successful round for longer than the threshold.
+ * keeps running, it already backs off and retries, and restarting it would abort
+ * the retry it is in the middle of. Only a loop that has stopped returning at all
+ * needs replacing.
  */
 export function assessPollHealth(input: PollHealthInput, thresholds: StallThresholds): WatchdogVerdict {
-  const reference = input.lastOkAt ?? input.startedAt
+  const reference = input.lastRoundAt ?? input.startedAt
   const lagMs = Math.max(0, input.now - reference)
   const limit = stallThresholdMs(thresholds)
   if (lagMs <= limit) return { action: 'healthy', lagMs }
@@ -81,7 +92,7 @@ export function assessPollHealth(input: PollHealthInput, thresholds: StallThresh
     // Naming which of the two it is matters: "never polled" at boot usually means a
     // configuration or credential problem, while "stalled" after hours of good rounds
     // means the transport or the loop. They lead to different investigations.
-    reason: input.lastOkAt === undefined ? 'never-polled' : 'stalled',
+    reason: input.lastRoundAt === undefined ? 'never-polled' : 'stalled',
     lagMs,
     failures: input.consecutiveFailures,
   }

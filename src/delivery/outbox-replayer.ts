@@ -35,6 +35,15 @@ export interface OutboxReplayerDeps {
   pruneSent: (maxAgeMs: number) => Promise<number>
   /** True only for failures that will never succeed, e.g. a malformed recipient. */
   isPermanentlyUnsendable: (errorCode: IlinkErrorCode | undefined) => boolean
+  /**
+   * True when this text already reached the owner by another sender.
+   *
+   * Automatic delivery and replay are independent senders that never talk to each
+   * other, so without this check a parked report that a retry delivered is sent
+   * again the next time the replayer runs. Retiring the entry is correct — the text
+   * is on the phone — and it is not a "permanent failure": nothing was lost.
+   */
+  shouldSkip?: (target: PushTarget) => boolean
   log: { warn: (...args: unknown[]) => void; debug: (...args: unknown[]) => void }
 }
 
@@ -55,6 +64,14 @@ export class OutboxReplayer {
   async replay(): Promise<void> {
     for (const { id, target } of await this.deps.list()) {
       try {
+        if (this.deps.shouldSkip?.(target) === true) {
+          // The same text reached the owner through the other sender. Retire the
+          // entry rather than sending a duplicate.
+          this.deps.log.debug('outbox entry %s already delivered by another sender', id)
+          await this.deps.markSent(id)
+          continue
+        }
+
         const outcome = await this.deps.push(target, { parkOnFailure: false })
         if (outcome.ok) {
           await this.deps.markSent(id)

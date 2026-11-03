@@ -102,6 +102,11 @@ export class Heartbeat {
     return this.poll.lastOkAt === undefined ? undefined : new Date(this.poll.lastOkAt).getTime()
   }
 
+  /** When the last round was attempted, success or failure — the liveness signal. */
+  lastRoundAtMs(): number | undefined {
+    return this.poll.lastRoundAt === undefined ? undefined : new Date(this.poll.lastRoundAt).getTime()
+  }
+
   consecutiveFailures(): number {
     return this.poll.consecutiveFailures
   }

@@ -74,7 +74,8 @@ marker inside a real report does not suppress it.
 ### Failed turns
 
 A deliverable turn that ends **without** `completed` — errored, aborted, canceled —
-sends `⚠️ 回合未完成（reason，timestamp）` instead of its partial text.
+sends `⚠️ 回合未完成（reason，timestamp）：本次没有可投递的内容。` instead of its
+partial text.
 
 The partial text must not go out: it is a fragment of an answer, not an answer.
 But dropping the turn entirely, which is what this plugin used to do, made a crashed

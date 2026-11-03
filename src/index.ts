@@ -104,7 +104,9 @@ export default class WeixinLink extends Service {
       read: () => ({
         now: Date.now(),
         startedAt: this.heartbeat.startedAtMs(),
-        lastOkAt: this.heartbeat.lastOkAtMs(),
+        // Liveness is "a round came back", not "a round succeeded": a failing loop is
+        // still running, and restarting it would abort the retry it is in the middle of.
+        lastRoundAt: this.heartbeat.lastRoundAtMs(),
         consecutiveFailures: this.heartbeat.consecutiveFailures(),
       }),
       restart: (verdict) => {
@@ -541,6 +543,9 @@ export default class WeixinLink extends Service {
       markSent: (id) => this.outbox.markSent(id),
       pruneSent: (maxAgeMs) => this.outbox.pruneSent(maxAgeMs),
       isPermanentlyUnsendable,
+      // The other sender is automatic delivery; this is what makes the dedupe gate
+      // hold for the pair instead of only for one of them.
+      shouldSkip: (target) => this.dedupe.isDuplicate(target.text),
       log: this.log,
     })
     await replayer.replay()
@@ -581,8 +586,7 @@ export default class WeixinLink extends Service {
         toUserId: target.toUserId,
         text: target.text,
         reason: outcome.errorCode ?? 'UNKNOWN',
-      })
-    }
+      })    }
 
     // Failure ids must be unique per attempt: two failures in the same
     // millisecond would otherwise share `fail-<ts>` and read as one record to
@@ -596,6 +600,11 @@ export default class WeixinLink extends Service {
       retries: outcome.retries,
       toUserId: target.toUserId,
     })
+
+    // Every successful send counts as delivered, whichever caller made it. Recording
+    // here — not only in automatic delivery — is what lets the replayer recognise a
+    // text that a tool push already put on the phone.
+    if (outcome.ok) this.dedupe.record(target.text)
 
     return outcome
   }
