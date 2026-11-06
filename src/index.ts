@@ -232,7 +232,7 @@ export default class WeixinLink extends Service {
       userId: message.userId,
       messageId: message.messageId,
       textChars: message.text.length,
-      media: message.media?.map((item) => ({ type: item.type, keys: item.keys })),
+      media: message.media?.map((item) => ({ type: item.type, keys: item.keys, shape: item.shape })),
     }
     try {
       appendFileSync(join(this.dataDir, 'inbound-media.log'), `${JSON.stringify(record)}\n`, { mode: 0o600 })

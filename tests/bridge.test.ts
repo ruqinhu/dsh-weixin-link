@@ -53,7 +53,30 @@ describe('toInboundText', () => {
 
     expect(inbound?.text).toContain('图片')
     expect(inbound?.text).toContain('未读取')
-    expect(inbound?.media).toEqual([{ type: 2, keys: ['image_item'] }])
+    expect(inbound?.media).toMatchObject([{ type: 2, keys: ['image_item'] }])
+  })
+
+  it('records the nested field skeleton without any value', () => {
+    // The first capture only logged the item's top-level keys, which yielded the name
+    // `image_item` and nothing inside it — no way to build a downloader from that.
+    const inbound = toInboundText(
+      message({
+        item_list: [
+          {
+            type: 2,
+            image_item: { url: 'https://secret/cdn', aes_key: 'k3y', size: { w: 10, h: 20 } },
+          },
+        ],
+      }),
+      { echoOwnMessages: false },
+    )
+
+    const shape = JSON.stringify(inbound?.media?.[0]?.shape)
+    expect(shape).toContain('image_item')
+    expect(shape).toContain('aes_key')
+    expect(shape).toContain('size')
+    expect(shape).not.toContain('secret')
+    expect(shape).not.toContain('k3y')
   })
 
   it('mentions media that arrived beside text without replacing the text', () => {

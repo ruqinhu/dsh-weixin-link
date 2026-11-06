@@ -52,24 +52,49 @@ export interface WeixinMessage {
   create_time?: number
 }
 
-/** 一条消息里的非文本 item：只有类型与字段名，没有内容。 */
+/** 一条消息里的非文本 item：类型、字段名与字段骨架，没有任何值。 */
 export interface MediaItem {
   type: number
   /** 该 item 上的字段名（已排除 `type` 本身）。 */
   keys: string[]
+  /**
+   * 递归的字段骨架：键名 + 值类型，最多三层。
+   *
+   * 第一版只记了顶层字段名，结果只看到 `image_item` 这个名字，拿不到它里面的下载
+   * 地址与密钥 —— 等于抓了个空。骨架把嵌套结构一起记下来，而值始终不出现。
+   */
+  shape: unknown
+}
+
+/** 把一个值折叠成「键 + 类型」的骨架，不含任何实际内容。 */
+function shapeOf(value: unknown, depth: number): unknown {
+  if (depth <= 0) return typeof value
+  if (Array.isArray(value)) return value.length === 0 ? ['<empty>'] : [shapeOf(value[0], depth - 1)]
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = shapeOf(child, depth - 1)
+    }
+    return out
+  }
+  return typeof value
 }
 
 /**
  * 列出消息里的非文本 item。
  *
- * 返回值只用于两件事：告诉模型「收到了一条看不到内容的消息」，以及把线上字段名写进
+ * 返回值只用于两件事：告诉模型「收到了一条看不到内容的消息」，以及把线上字段结构写进
  * 日志，好让下一轮据此建模。
  */
 export function mediaItems(message: WeixinMessage): MediaItem[] {
   const out: MediaItem[] = []
   for (const item of message.item_list ?? []) {
     if (item.type === ITEM_TYPE_TEXT) continue
-    out.push({ type: item.type, keys: Object.keys(item).filter((key) => key !== 'type') })
+    out.push({
+      type: item.type,
+      keys: Object.keys(item).filter((key) => key !== 'type'),
+      shape: shapeOf(item, 3),
+    })
   }
   return out
 }
