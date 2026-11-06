@@ -1,12 +1,20 @@
 /**
- * Wire types for Tencent's iLink Bot protocol.
+ * 腾讯 iLink Bot 协议的线上类型。
  *
- * Only the subset this plugin drives is modelled: text messages out, inbound
- * message polling in. Media items are recognised by `type` but never sent.
+ * 只建模本插件实际驱动的子集：出站文本、入站轮询。图片/文件/语音/视频按 `type`
+ * 识别，但内容字段没有建模 —— 图片只保留字段名（诊断与后续实现用），不带值。
  */
 
-/** Inbound item kinds. Only `1` (text) carries a payload this plugin reads. */
+/** 入站 item 类型。只有 `1`（文本）带本插件读取的载荷。 */
 export const ITEM_TYPE_TEXT = 1
+/** 图片。当前通道不读内容，只把它算作「收到了一条非文本消息」。 */
+export const ITEM_TYPE_IMAGE = 2
+/** 文件。 */
+export const ITEM_TYPE_FILE = 3
+/** 语音。 */
+export const ITEM_TYPE_VOICE = 4
+/** 视频。 */
+export const ITEM_TYPE_VIDEO = 5
 
 /** `message_type` for messages the bot sends. */
 export const MESSAGE_TYPE_BOT = 2
@@ -18,6 +26,14 @@ export interface ItemListEntry {
   /** 1 = text, 2 = image, 3 = file, 4 = voice, 5 = video */
   type: number
   text_item?: { text: string }
+  /**
+   * 其他 item 的字段名不在类型里。
+   *
+   * 声称知道它们会写下一个从未被真实报文验证过的形状 —— 而猜错的代价是下一次静默
+   * 失败。这里只保留键名，够诊断一次真实消息的骨架，也不会把图片内容或 CDN 地址
+   * 写进日志。
+   */
+  [key: string]: unknown
 }
 
 /** One message as returned by `getupdates`. */
@@ -34,6 +50,47 @@ export interface WeixinMessage {
   item_list: ItemListEntry[]
   message_id?: string
   create_time?: number
+}
+
+/** 一条消息里的非文本 item：只有类型与字段名，没有内容。 */
+export interface MediaItem {
+  type: number
+  /** 该 item 上的字段名（已排除 `type` 本身）。 */
+  keys: string[]
+}
+
+/**
+ * 列出消息里的非文本 item。
+ *
+ * 返回值只用于两件事：告诉模型「收到了一条看不到内容的消息」，以及把线上字段名写进
+ * 日志，好让下一轮据此建模。
+ */
+export function mediaItems(message: WeixinMessage): MediaItem[] {
+  const out: MediaItem[] = []
+  for (const item of message.item_list ?? []) {
+    if (item.type === ITEM_TYPE_TEXT) continue
+    out.push({ type: item.type, keys: Object.keys(item).filter((key) => key !== 'type') })
+  }
+  return out
+}
+
+const MEDIA_LABELS: Record<number, string> = {
+  [ITEM_TYPE_IMAGE]: '张图片',
+  [ITEM_TYPE_FILE]: '个文件',
+  [ITEM_TYPE_VOICE]: '条语音',
+  [ITEM_TYPE_VIDEO]: '个视频',
+}
+
+/** 人类可读的媒体摘要，例如 `2 张图片、1 个文件`。 */
+export function describeMedia(items: readonly MediaItem[]): string {
+  const counts = new Map<number, number>()
+  for (const item of items) counts.set(item.type, (counts.get(item.type) ?? 0) + 1)
+  const parts: string[] = []
+  for (const [type, count] of counts) {
+    const label = MEDIA_LABELS[type] ?? `个未知类型(${type})`
+    parts.push(`${count} ${label}`)
+  }
+  return parts.join('、')
 }
 
 export interface GetUpdatesResponse {

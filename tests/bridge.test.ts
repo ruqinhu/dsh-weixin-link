@@ -42,8 +42,55 @@ describe('toInboundText', () => {
     expect(toInboundText(message({ message_type: 2 }), { echoOwnMessages: true })?.text).toBe('hello')
   })
 
-  it('drops a message with no text item', () => {
-    expect(toInboundText(message({ item_list: [{ type: 2 }] }), { echoOwnMessages: false })).toBeUndefined()
+  it('turns a media-only message into a placeholder instead of dropping it', () => {
+    // 2026-11-04: the owner sent an image twice and the bot never saw anything —
+    // no inbound, no token refresh, no log line. Silence is the failure; a
+    // placeholder that says what arrived and what the channel cannot read is the
+    // minimum honest behaviour until images are implemented.
+    const inbound = toInboundText(message({ item_list: [{ type: 2, image_item: { url: 'x' } }] }), {
+      echoOwnMessages: false,
+    })
+
+    expect(inbound?.text).toContain('图片')
+    expect(inbound?.text).toContain('未读取')
+    expect(inbound?.media).toEqual([{ type: 2, keys: ['image_item'] }])
+  })
+
+  it('mentions media that arrived beside text without replacing the text', () => {
+    const inbound = toInboundText(
+      message({
+        item_list: [
+          { type: 1, text_item: { text: '看看这张图' } },
+          { type: 2, image_item: { url: 'x' } },
+        ],
+      }),
+      { echoOwnMessages: false },
+    )
+
+    expect(inbound?.text.startsWith('看看这张图')).toBe(true)
+    expect(inbound?.text).toContain('图片')
+  })
+
+  it('counts several media items without leaking their contents', () => {
+    const inbound = toInboundText(
+      message({
+        item_list: [
+          { type: 2, image_item: { url: 'https://secret/cdn?key=1' } },
+          { type: 2, image_item: { url: 'https://secret/cdn?key=2' } },
+          { type: 3, file_item: { url: 'https://secret/f' } },
+        ],
+      }),
+      { echoOwnMessages: false },
+    )
+
+    expect(inbound?.text).toContain('2 张图片')
+    expect(inbound?.text).toContain('1 个文件')
+    expect(inbound?.text).not.toContain('secret')
+    expect(inbound?.media?.map((item) => item.keys)).toEqual([
+      ['image_item'],
+      ['image_item'],
+      ['file_item'],
+    ])
   })
 
   it('drops whitespace-only text', () => {
@@ -61,11 +108,17 @@ describe('collectInbound', () => {
     const batch = [
       message({ from_user_id: 'a', item_list: [{ type: 1, text_item: { text: '1' } }] }),
       message({ message_type: 2 }),
-      message({ from_user_id: 'b', item_list: [{ type: 2 }] }),
+      message({ from_user_id: 'b', item_list: [{ type: 2, image_item: { url: 'x' } }] }),
       message({ from_user_id: 'c', item_list: [{ type: 1, text_item: { text: '3' } }] }),
     ]
 
-    expect(collectInbound(batch, { echoOwnMessages: false }).map((c) => c.userId)).toEqual(['a', 'c'])
+    // The image is kept as a placeholder: it is the owner speaking, even though
+    // this channel cannot read what is inside.
+    expect(collectInbound(batch, { echoOwnMessages: false }).map((c) => c.userId)).toEqual([
+      'a',
+      'b',
+      'c',
+    ])
   })
 
   it('returns an empty array for an empty batch', () => {

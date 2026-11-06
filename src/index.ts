@@ -216,6 +216,32 @@ export default class WeixinLink extends Service {
   }
 
   /**
+   * Record one inbound non-text message as a JSONL line.
+   *
+   * A file rather than a logger call for the same reason as the delivery trace:
+   * cordis' logger only buffers in memory for a running instance, so a `warn` from
+   * this plugin is invisible from outside the process. The line carries the item
+   * types and field *names* only — never URLs, keys or bytes — because its purpose
+   * is to let the next implementation model the protocol, not to archive media.
+   *
+   * Failures are swallowed: diagnostics must never stop the channel from receiving.
+   */
+  private appendInboundMedia(message: InboundText, at: Date): void {
+    const record = {
+      at: at.toISOString(),
+      userId: message.userId,
+      messageId: message.messageId,
+      textChars: message.text.length,
+      media: message.media?.map((item) => ({ type: item.type, keys: item.keys })),
+    }
+    try {
+      appendFileSync(join(this.dataDir, 'inbound-media.log'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    } catch {
+      // Diagnostics are best-effort by design.
+    }
+  }
+
+  /**
    * Append one line to the delivery trace.
    *
    * A separate file from the receipts on purpose: receipts record sends that were
@@ -407,6 +433,15 @@ export default class WeixinLink extends Service {
         const now = new Date()
         for (const message of inbound) {
           await this.contextTokens.record(message.userId, message.contextToken, now)
+        }
+        // Non-text messages used to vanish without a trace. They now reach the agent
+        // as a placeholder and land here as evidence: the field names in `keys` are
+        // what an image implementation has to model, and the file is where they can
+        // be read without a debugger attached to a live bot.
+        for (const message of inbound) {
+          if (message.media !== undefined && message.media.length > 0) {
+            this.appendInboundMedia(message, now)
+          }
         }
         this.heartbeat.markInbound(now)
         // Not awaited: a replay may sit in rate-limit backoff for minutes, and the

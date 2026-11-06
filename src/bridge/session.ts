@@ -1,7 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { WeixinMessage } from '../ilink/types.js'
-import { messageText, MESSAGE_TYPE_BOT } from '../ilink/types.js'
+import type { MediaItem, WeixinMessage } from '../ilink/types.js'
+import { describeMedia, mediaItems, messageText, MESSAGE_TYPE_BOT } from '../ilink/types.js'
 
 export interface InboundText {
   userId: string
@@ -9,14 +9,27 @@ export interface InboundText {
   contextToken: string
   /** Server-side id, used to de-duplicate a re-delivered poll batch. */
   messageId?: string
+  /**
+   * 这条消息里非文本 item 的形状（只有类型与字段名）。
+   *
+   * 带出来是为了两件事：把「收到了一条读不了的消息」这件事写进可观测的文件，以及为
+   * 后续真正支持图片留下真实的协议骨架。
+   */
+  media?: readonly MediaItem[]
 }
 
 /**
  * Reduce one inbound wire message to the parts this plugin acts on.
  *
- * Returns `undefined` for anything unusable — the bot's own echo (unless asked
- * for), media-only messages, or messages with no text — so callers never branch
- * on item kinds.
+ * 非文本消息不再被丢掉。丢掉是上一版的写法，后果是**彻底静默**：用户以为发了，模型
+ * 以为没发，日志一行都没有 —— 2026-11-04 一位用户发了两次图片，最后说「不改了就这样吧」，
+ * 而服务端没有任何痕迹。
+ *
+ * 现在媒体消息会被折成一条模型看得懂的文本：只说收到了什么、内容没有读取、请对方改用
+ * 文字或链接。真正的语义只能来自用户，因为这条通道今天确实读不了图片。
+ *
+ * 返回 `undefined` 只针对真正没有载荷的消息：bot 自己的回声（除非要求）、既无文本也
+ * 无媒体、或缺少发送者/令牌。
  */
 export function toInboundText(
   message: WeixinMessage,
@@ -25,7 +38,8 @@ export function toInboundText(
   if (message.message_type === MESSAGE_TYPE_BOT && !options.echoOwnMessages) return undefined
 
   const text = messageText(message)
-  if (text === '') return undefined
+  const media = mediaItems(message)
+  if (text === '' && media.length === 0) return undefined
 
   const userId = message.from_user_id
   const contextToken = message.context_token
@@ -33,7 +47,20 @@ export function toInboundText(
     return undefined
   }
 
-  return { userId, text, contextToken, messageId: message.message_id }
+  const composed =
+    text === ''
+      ? `（收到${describeMedia(media)}，但当前通道只能处理文本，内容未读取；请让用户改用文字描述或发链接。）`
+      : media.length === 0
+        ? text
+        : `${text}\n\n（同一条消息还含${describeMedia(media)}，内容未读取）`
+
+  return {
+    userId,
+    text: composed,
+    contextToken,
+    messageId: message.message_id,
+    ...(media.length === 0 ? {} : { media }),
+  }
 }
 
 /**
