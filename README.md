@@ -93,7 +93,7 @@ Four minutes of silence became one line on the phone saying the run did not fini
 
 | Item | Value |
 | --- | --- |
-| DSH | `0.2.1-rc.5` (peer dependencies pinned) |
+| DSH | `0.2.2-rc.1` (peer dependencies pinned) |
 | Runtime | Node 22+, no native modules |
 | Required services | `tools`, `credentials`, `sessionController`; `agents` optional |
 | Payload | text out; inbound text, images, files and voice |

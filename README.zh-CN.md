@@ -91,7 +91,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| DSH | `0.2.1-rc.5`（peer 依赖按此钉住） |
+| DSH | `0.2.2-rc.1`（peer 依赖按此钉住） |
 | 运行时 | Node 22+，无原生模块 |
 | 必需服务 | `tools`、`credentials`、`sessionController`；`agents` 可选 |
 | 载荷 | 出站纯文本；入站文本、图片、文件、语音 |
