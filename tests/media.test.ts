@@ -57,6 +57,7 @@ describe('decodeImagePayload', () => {
 
     expect(decoded.mime).toBe('image/png')
     expect(decoded.decrypted).toBe(false)
+    expect(decoded.mode).toBe('plain')
     expect(decoded.bytes.equals(PNG)).toBe(true)
   })
 
@@ -68,6 +69,9 @@ describe('decodeImagePayload', () => {
 
     expect(decoded.decrypted).toBe(true)
     expect(decoded.mime).toBe('image/jpeg')
+    // The winning scheme is recorded because the wire shape does not say which one it
+    // is; three deploys guessed and produced nothing before this was logged.
+    expect(decoded.mode).toBe('cbc-iv-from-key')
     expect(decoded.bytes.equals(JPEG)).toBe(true)
   })
 

@@ -29,6 +29,14 @@ export interface DecodedImage {
   extension: string
   /** True when the payload had to be decrypted before it looked like an image. */
   decrypted: boolean
+  /**
+   * Which scheme produced the bytes, or `plain` when no decryption was needed.
+   *
+   * Recorded because the wire shape does not say: on 2026-11-06 the first three
+   * deployments guessed one scheme and silently produced nothing. The winning name in
+   * the log is what turns the next surprise from a guessing game into a read.
+   */
+  mode: string
 }
 
 /** Default download budget. A chat image is small; a stall means something is wrong. */
@@ -96,26 +104,44 @@ function keyCandidates(aesKeyB64: string | undefined, aesKeyAlt: string | undefi
  *
  * WeChat-family CDNs derive the IV from the key itself (first 16 bytes), which is
  * why no IV field exists in the wire shape. Padding failures surface as a thrown
- * error and are treated as "wrong key", not as a fatal condition.
+ * error and are treated as "wrong scheme", not as a fatal condition.
+ *//**
+ * A payload that arrived intact but did not decode.
+ *
+ * Carries the raw bytes so the caller can keep them for diagnosis: "did not decode"
+ * without the bytes is a dead end, and adding another round trip through the owner's
+ * phone to find out what the bytes look like is a worse trade than one 0600 file that
+ * gets deleted after the scheme is understood.
  */
-function aesCbcDecrypt(payload: Buffer, key: Buffer): Buffer {
-  const iv = key.subarray(0, 16)
-  const decipher = createDecipheriv(`aes-${key.length * 8}-cbc`, key, iv)
-  return Buffer.concat([decipher.update(payload), decipher.final()])
+export class ImageDecodeError extends Error {
+  constructor(
+    message: string,
+    readonly payload: Buffer,
+    readonly contentType: string | undefined,
+    readonly status: number,
+  ) {
+    super(message)
+    this.name = 'ImageDecodeError'
+  }
+}
+
+/** First bytes of a failed payload, as hex, for the log. */
+export function payloadPrefix(payload: Buffer, length = 16): string {
+  return payload.subarray(0, length).toString('hex')
 }
 
 /**
  * Turn downloaded bytes into a usable image.
  *
- * Two cases exist in the wild and both are handled by evidence rather than by a
- * flag: some deployments serve the image in the clear, others encrypt it. The
- * signature check runs *after* decryption too, so a wrong key is reported as a
- * wrong key instead of being written to disk as a corrupt JPEG.
+ * Several schemes exist in the wild and this picks by evidence, not by a flag: the
+ * signature check runs on the plain payload first, then on every decryption variant
+ * tried. A wrong key is reported as a wrong key instead of being written to disk as a
+ * corrupt JPEG.
  */
 export function decodeImagePayload(payload: Buffer, item: ImageItem): DecodedImage {
   const plain = identifyImage(payload)
   if (plain !== undefined) {
-    return { bytes: payload, mime: plain.mime, extension: plain.extension, decrypted: false }
+    return { bytes: payload, mime: plain.mime, extension: plain.extension, decrypted: false, mode: 'plain' }
   }
 
   const keys = keyCandidates(item.media?.aes_key, item.aeskey)
@@ -124,8 +150,14 @@ export function decodeImagePayload(payload: Buffer, item: ImageItem): DecodedIma
   }
 
   for (const key of keys) {
-    try {
-      const decrypted = aesCbcDecrypt(payload, key)
+    for (const attempt of DECRYPTION_MODES) {
+      let decrypted: Buffer
+      try {
+        decrypted = attempt.decrypt(payload, key)
+      } catch {
+        // Padding failure or bad block length: try the next scheme.
+        continue
+      }
       const signature = identifyImage(decrypted)
       if (signature !== undefined) {
         return {
@@ -133,14 +165,50 @@ export function decodeImagePayload(payload: Buffer, item: ImageItem): DecodedIma
           mime: signature.mime,
           extension: signature.extension,
           decrypted: true,
+          mode: attempt.name,
         }
       }
-    } catch {
-      // Padding failure: try the next key encoding.
     }
   }
   throw new Error('image payload did not decode with any key encoding')
 }
+
+interface DecryptionMode {
+  name: string
+  decrypt: (payload: Buffer, key: Buffer) => Buffer
+}
+
+function aesCbc(payload: Buffer, key: Buffer, iv: Buffer): Buffer {
+  const decipher = createDecipheriv(`aes-${key.length * 8}-cbc`, key, iv)
+  return Buffer.concat([decipher.update(payload), decipher.final()])
+}
+
+/**
+ * The schemes worth trying, most likely first.
+ *
+ * WeCom-family CDNs document AES-CBC with the IV taken from the key, but the payload
+ * that failed on 2026-11-06 decoded with none of the obvious variants — so the
+ * remaining plausible shapes (zero IV, ECB, an IV prepended to the ciphertext) are
+ * tried too, and the winning one is reported. Guessing a single scheme is how a
+ * future deployment silently breaks.
+ */
+const DECRYPTION_MODES: readonly DecryptionMode[] = [
+  { name: 'cbc-iv-from-key', decrypt: (p, k) => aesCbc(p, k, k.subarray(0, 16)) },
+  { name: 'cbc-zero-iv', decrypt: (p, k) => aesCbc(p, k, Buffer.alloc(16)) },
+  {
+    name: 'cbc-iv-prepended',
+    decrypt: (p, k) => (p.length > 32 ? aesCbc(p.subarray(16), k, p.subarray(0, 16)) : (() => {
+      throw new Error('payload too short for a prepended IV')
+    })()),
+  },
+  {
+    name: 'ecb',
+    decrypt: (p, k) => {
+      const decipher = createDecipheriv(`aes-${k.length * 8}-ecb`, k, null)
+      return Buffer.concat([decipher.update(p), decipher.final()])
+    },
+  },
+]
 
 export interface DownloadOptions {
   timeoutMs?: number
@@ -178,5 +246,10 @@ export async function downloadImage(
   if (bytes.length === 0) throw new Error('image download returned no bytes')
   if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`image too large: ${bytes.length} bytes`)
 
-  return decodeImagePayload(bytes, item)
+  const contentType = response.headers.get('content-type') ?? undefined
+  try {
+    return decodeImagePayload(bytes, item)
+  } catch (error) {
+    throw new ImageDecodeError((error as Error).message, bytes, contentType, response.status)
+  }
 }

@@ -27,7 +27,7 @@ import {
 } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
-import { downloadImage } from './ilink/media.js'
+import { downloadImage, ImageDecodeError, payloadPrefix } from './ilink/media.js'
 import { Heartbeat } from './watchdog/heartbeat.js'
 import { Watchdog } from './watchdog/watchdog.js'
 
@@ -251,6 +251,8 @@ export default class WeixinLink extends Service {
 
     const saved: string[] = []
     const failures: string[] = []
+    const modes: string[] = []
+    let decode: { status: number; contentType?: string; prefix: string } | undefined
     for (const [index, image] of images.entries()) {
       try {
         const decoded = await downloadImage(image)
@@ -259,11 +261,35 @@ export default class WeixinLink extends Service {
         const target = join(directory, `${message.messageId ?? Date.now()}-${index}.${decoded.extension}`)
         await writeFile(target, decoded.bytes, { mode: 0o600 })
         saved.push(target)
+        modes.push(decoded.mode)
       } catch (error) {
         failures.push((error as Error).message)
+        // Keep the raw payload when the bytes arrived but did not decode. Without it
+        // the only way to learn the scheme is another image from the owner, and
+        // "another round trip through a phone" is a bad diagnostic tool.
+        if (error instanceof ImageDecodeError && decode === undefined) {
+          decode = {
+            status: error.status,
+            ...(error.contentType === undefined ? {} : { contentType: error.contentType }),
+            prefix: payloadPrefix(error.payload),
+          }
+          try {
+            const directory = join(this.dataDir, 'inbox')
+            await mkdir(directory, { recursive: true })
+            const raw = join(directory, `${message.messageId ?? Date.now()}-${index}.raw.bin`)
+            await writeFile(raw, error.payload, { mode: 0o600 })
+          } catch {
+            // Best effort: the log line above still records the failure.
+          }
+        }
       }
     }
-    this.appendInboundMedia(message, at, { saved: saved.length, failures })
+    this.appendInboundMedia(message, at, {
+      saved: saved.length,
+      failures,
+      ...(modes.length === 0 ? {} : { modes }),
+      ...(decode === undefined ? {} : { decode }),
+    })
 
     if (saved.length === 0) return message
     const note = `（收到 ${images.length} 张图片，已保存到 ${saved.join('、')}；请用 read_image 查看内容。）`
@@ -284,7 +310,12 @@ export default class WeixinLink extends Service {
   private appendInboundMedia(
     message: InboundText,
     at: Date,
-    outcome?: { saved: number; failures: readonly string[] },
+    outcome?: {
+      saved: number
+      failures: readonly string[]
+      modes?: readonly string[]
+      decode?: { status: number; contentType?: string; prefix: string }
+    },
   ): void {
     const record = {
       at: at.toISOString(),
@@ -687,7 +718,8 @@ export default class WeixinLink extends Service {
         toUserId: target.toUserId,
         text: target.text,
         reason: outcome.errorCode ?? 'UNKNOWN',
-      })    }
+      })
+    }
 
     // Failure ids must be unique per attempt: two failures in the same
     // millisecond would otherwise share `fail-<ts>` and read as one record to
