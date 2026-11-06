@@ -355,28 +355,16 @@ export default class WeixinLink extends Service {
       }
     }
     for (const [index, voice] of voices.entries()) {
-      let target: string
       try {
-        target = await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice, {
-          extension: 'silk',
-          mime: 'audio/silk',
-          kind: 'audio',
-        })
-        savedVoices.push(target)
-      } catch (error) {
-        fail(error, `voice${index}`)
-        continue
-      }
-      if (!this.config.enableStt) continue
-      try {
-        transcripts.push(
-          await transcribeVoice(target, {
-            command: this.config.sttCommand.trim() === '' ? undefined : this.config.sttCommand,
-            timeoutMs: this.config.sttTimeoutMs,
+        savedVoices.push(
+          await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice, {
+            extension: 'silk',
+            mime: 'audio/silk',
+            kind: 'audio',
           }),
         )
       } catch (error) {
-        failures.push(`stt: ${(error as Error).message}`)
+        fail(error, `voice${index}`)
       }
     }
     for (const [index, video] of videos.entries()) {
@@ -393,13 +381,38 @@ export default class WeixinLink extends Service {
       }
     }
 
+    // Log the download outcome *before* transcription. On 2026-11-06 a hung STT burned
+    // two minutes and the log still said nothing had been saved, because the only log
+    // line came after the slow step — the evidence was waiting on the thing that failed.
     this.appendInboundMedia(message, at, {
       saved: savedImages.length + savedFiles.length + savedVoices.length + savedVideos.length,
       failures,
       ...(modes.length === 0 ? {} : { modes }),
-      ...(transcripts.length === 0 ? {} : { transcripts: transcripts.length }),
       ...(decode === undefined ? {} : { decode }),
     })
+
+    const sttFailures: string[] = []
+    if (this.config.enableStt) {
+      for (const target of savedVoices) {
+        try {
+          transcripts.push(
+            await transcribeVoice(target, {
+              command: this.config.sttCommand.trim() === '' ? undefined : this.config.sttCommand,
+              timeoutMs: this.config.sttTimeoutMs,
+            }),
+          )
+        } catch (error) {
+          sttFailures.push(`stt: ${(error as Error).message}`)
+        }
+      }
+    }
+    if (transcripts.length > 0 || sttFailures.length > 0) {
+      this.appendInboundMedia(message, at, {
+        saved: 0,
+        failures: sttFailures,
+        ...(transcripts.length === 0 ? {} : { transcripts: transcripts.length }),
+      })
+    }
 
     const notes: string[] = []
     if (transcripts.length > 0) notes.push(`（语音转写：${transcripts.join(' / ')}）`)

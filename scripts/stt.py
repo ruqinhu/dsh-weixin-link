@@ -24,6 +24,14 @@ import os
 import sys
 import tempfile
 
+# Set before importing faster_whisper: its loader checks Hugging Face for a newer
+# model, and on a host that cannot reach HF that check blocks for minutes. The model is
+# cached (`~/.cache/huggingface/hub/models--Systran--faster-whisper-base`), so offline
+# mode is the correct default here.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+
 SILK_SUFFIXES = (".silk", ".slk")
 
 # Defaults from the official adapter.

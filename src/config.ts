@@ -131,6 +131,6 @@ export const Config: Schema<Config> = Schema.object({
         'Empty uses the bundled python helper, which needs faster_whisper and pilk.',
     ),
   sttTimeoutMs: Schema.number()
-    .default(180_000)
+    .default(90_000)
     .description('Give up on one transcription after this long; the message then carries the saved path.'),
 })

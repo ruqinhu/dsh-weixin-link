@@ -79,6 +79,17 @@ export async function transcribeVoice(file: string, options: SttOptions = {}): P
     const child = spawn(argv[0] as string, argv.slice(1), {
       shell,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Offline mode is not optional. faster-whisper's model loader asks Hugging Face
+      // whether its cached model is current; on a box without reachable HF that check
+      // is a TCP connect that hangs until the kernel gives up — observed as a
+      // transcription burning 2m20s at 0.4% CPU while the message sat undelivered.
+      // The model is already cached, so the check is pure cost.
+      env: {
+        ...process.env,
+        HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE ?? '1',
+        TRANSFORMERS_OFFLINE: process.env.TRANSFORMERS_OFFLINE ?? '1',
+        OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? '2',
+      },
     })
     let stdout = ''
     let stderr = ''
