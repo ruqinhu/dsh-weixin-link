@@ -38,6 +38,8 @@ context, so the last one would classify every turn as context and deliver nothin
 | Failed turns | `⚠️ 回合未完成（reason，timestamp）：本次没有可投递的内容。`, at most one per session per hour | sending the partial text: a fragment reads like an answer; skipping: a crashed 07:00 report looks like a day with no schedule | the hourly floor is in memory, so a restart can add one |
 | Images | downloaded from the CDN, AES-CBC decrypted, saved to `inbox/`, and the message names the files for `read_image` | dropping them silently: on 2026-11-04 an image was sent twice and neither the agent nor the log saw anything, so the owner gave up ("不改了就这样吧") | one download per image inside a background task, and a decrypt failure degrades to the placeholder |
 | Other media | folded into a placeholder the agent can act on (`（收到 1 个文件…）`), with the wire field skeleton appended to `inbound-media.log` | pretending to have read a voice note or a file: the model would answer about content nobody read | content still unread — the placeholder says so |
+| Files | downloaded, decrypted, saved to `inbox/`, and the message names the path for `read` or `bash` | dropping them: a document the owner sent would be invisible to the agent | an unidentified type is saved as `.bin` instead of being guessed |
+| Voice | downloaded, then silk → 24 kHz wav (`pilk`) → faster-whisper `base` int8 (`language=zh`, `vad_filter=False`, `beam_size=5`); the transcript becomes the message | feeding audio to the model: this deployment rejects `input_audio` with 422, so a transcript is the only route | 5–10 s per message on a 1.9 GB box; a failed transcription degrades to the saved path |
 | Receive vs send | replay on its own timer + single-flight; bootstrap does not await it | awaiting replay inside the poll loop: a 30/60/120 s backoff means 3.5 minutes deaf | replay is serial — one slow send delays the rest |
 | Liveness | rewrite `state/heartbeat.json` every round; judge every 60 s; restart when no round has been **attempted** for 3 budgets (≥ 90 s) | judging by last success: a loop failing every round gets restarted every tick, aborting the retry in flight | cannot tell "hung" from "paused" |
 | Replay deletion | delete only on a provably permanent failure | deleting on "anything not NEEDS_INBOUND/RATE_LIMITED": `ret:-2 prepare failed` is transient, and that rule ate a 12:40 report | queue keeps entries that may never send |
@@ -94,7 +96,8 @@ Four minutes of silence became one line on the phone saying the run did not fini
 | DSH | `0.2.1-rc.5` (peer dependencies pinned) |
 | Runtime | Node 22+, no native modules |
 | Required services | `tools`, `credentials`, `sessionController`; `agents` optional |
-| Payload | text only, ≤ 2,200 chars |
+| Payload | text out; inbound text, images, files and voice |
+| Voice transcription | needs `python3` + `faster_whisper` + `pilk` on the host; `sttCommand` overrides the helper |
 
 ## 8. Install, credentials, configuration
 
@@ -121,6 +124,9 @@ project/user `.env`, and reading the environment directly would shadow it.
 | `dedupeWindowMs` | `600000` | identical texts inside this window count as delivered |
 | `notifyTurnFailures` | `true` | announce a turn that ended without completing |
 | `watchdogIntervalMs` | `60000` | liveness check interval; `0` disables |
+| `enableStt` | `true` | transcribe inbound voice locally; off keeps the file only |
+| `sttCommand` | `""` | override the bundled helper; `{file}` is substituted |
+| `sttTimeoutMs` | `180000` | give up on one transcription after this long |
 
 ## 9. Tools and files
 
@@ -136,7 +142,7 @@ project/user `.env`, and reading the environment directly would shadow it.
 | `outbox/` | parked messages awaiting a token |
 | `state/heartbeat.json` | last attempt/success, failures, inbound count, restarts |
 | `inbound-media.log` | one line per inbound non-text message: item types, field **names**/skeleton, and the image save outcome (no URLs, keys or bytes) |
-| `inbox/` | images downloaded from inbound messages, named `<messageId>-<n>.<ext>`, mode 0600 |
+| `inbox/` | inbound images, files and voice, named `<messageId>-<kind><n>.<ext>`, mode 0600 |
 
 ```
 send session=... turn=12 kind=turn len=63

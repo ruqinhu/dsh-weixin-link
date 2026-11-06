@@ -37,6 +37,8 @@
 | 失败回合 | `⚠️ 回合未完成（原因，时间戳）：本次没有可投递的内容。`，每会话每小时最多一条 | 发半截正文：碎片读起来像答案；静默：崩掉的早报像没排任务 | 每小时下限存在内存，重启会多一条 |
 | 图片 | 从 CDN 下载 → AES-CBC 解密 → 存进 `inbox/`，消息里给出文件路径供 `read_image` 读取 | 静默丢弃：2026-11-04 用户发了两次图片，agent 和日志都没看见，最后说「不改了就这样吧」 | 每张图一次下载（在后台任务里），解密失败降级成占位文本 |
 | 其他媒体 | 折成一条模型能处理的占位文本（`（收到 1 个文件…）`），并把线上字段骨架追加进 `inbound-media.log` | 假装读过语音或文件：模型会对着没人读过的内容作答 | 内容仍未读取 —— 占位文本如实说明 |
+| 文件 | 下载、解密、存进 `inbox/`，消息里给出路径供 `read` 或 `bash` 读取 | 直接丢弃：用户发来的文档对 agent 等于不存在 | 识别不出类型时存成 `.bin`，不猜格式 |
+| 语音 | 下载后走 silk → 24 kHz wav（`pilk`）→ faster-whisper `base` int8（`language=zh`、`vad_filter=False`、`beam_size=5`），转写文本直接作为用户消息 | 把音频喂给模型：本部署 `input_audio` 返回 422，转写是唯一通路 | 1.9 GB 机器上每条 5–10 秒；转写失败降级成「已保存」而不是静默 |
 | 收发解耦 | 重放独立定时器 + 单飞；bootstrap 不 await | 在轮询里 await 重放：退避 30/60/120 秒意味着 3.5 分钟收不到消息 | 重放串行，慢发送拖住后面的条目 |
 | 存活判定 | 每轮写 `state/heartbeat.json`；每 60 秒判读；连续 3 个预算（≥90 秒）**没有尝试**则重启 | 按「上次成功」判：每轮都失败的循环会被每 tick 重启，掐掉正在进行的重试 | 分不清「挂死」和「被暂停」 |
 | 重放删除 | 只有可证明永久失败才删 | 按「既非 NEEDS_INBOUND 也非 RATE_LIMITED」删：`ret:-2 prepare failed` 是暂时性错误，这条规则吃掉过一条 12:40 午报 | 队列里会留可能永远发不出去的条目 |
@@ -92,7 +94,8 @@
 | DSH | `0.2.1-rc.5`（peer 依赖按此钉住） |
 | 运行时 | Node 22+，无原生模块 |
 | 必需服务 | `tools`、`credentials`、`sessionController`；`agents` 可选 |
-| 载荷 | 纯文本，≤ 2,200 字符 |
+| 载荷 | 出站纯文本；入站文本、图片、文件、语音 |
+| 语音转写 | 需要主机上有 `python3` + `faster_whisper` + `pilk`；`sttCommand` 可替换 |
 
 ## 8. 安装、凭据、配置
 
@@ -118,6 +121,9 @@ token 通过 DSH 凭据库读取（`ctx.credentials.resolve()`），不读 `proc
 | `dedupeWindowMs` | `600000` | 窗口内相同文本算已投递 |
 | `notifyTurnFailures` | `true` | 是否通报未正常结束的回合 |
 | `watchdogIntervalMs` | `60000` | 存活检查间隔；`0` 关闭 |
+| `enableStt` | `true` | 是否本地转写入站语音；关闭则只保存文件 |
+| `sttCommand` | `""` | 覆盖内置转写命令；`{file}` 会被替换 |
+| `sttTimeoutMs` | `180000` | 单条转写超时 |
 
 ## 9. 工具与文件
 
@@ -133,7 +139,7 @@ token 通过 DSH 凭据库读取（`ctx.credentials.resolve()`），不读 `proc
 | `outbox/` | 等 token 的暂存消息 |
 | `state/heartbeat.json` | 上次尝试/成功、失败数、入站数、重启数 |
 | `inbound-media.log` | 每条非文本入站一行：item 类型、字段名与骨架、图片保存结果（不含 URL、密钥或字节） |
-| `inbox/` | 从入站消息下载的图片，命名 `<messageId>-<n>.<ext>`，权限 0600 |
+| `inbox/` | 入站图片、文件与语音，命名 `<messageId>-<kind><n>.<ext>`，权限 0600 |
 
 ```
 send session=... turn=12 kind=turn len=63

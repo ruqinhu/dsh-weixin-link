@@ -1,10 +1,12 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ImageItem } from '../ilink/media.js'
+import type { MediaPayload } from '../ilink/media.js'
 import type { MediaItem, WeixinMessage } from '../ilink/types.js'
 import {
   describeMedia,
+  ITEM_TYPE_FILE,
   ITEM_TYPE_IMAGE,
+  ITEM_TYPE_VOICE,
   mediaItems,
   messageText,
   MESSAGE_TYPE_BOT,
@@ -32,7 +34,11 @@ export interface InboundText {
    */
   media?: readonly MediaItem[]
   /** 可直接下载的图片载荷；下载成功后由调用方替换 `text`。 */
-  images?: readonly ImageItem[]
+  images?: readonly MediaPayload[]
+  /** 文件载荷；下载后落盘并给出路径。 */
+  files?: readonly MediaPayload[]
+  /** 语音载荷；下载后转写。 */
+  voices?: readonly MediaPayload[]
 }
 
 /**
@@ -71,9 +77,14 @@ export function toInboundText(
         ? text
         : `${text}\n\n（同一条消息还含${describeMedia(media)}，内容未读取）`
 
-  const images = media
-    .filter((item) => item.type === ITEM_TYPE_IMAGE && item.image !== undefined)
-    .map((item) => item.image as ImageItem)
+  const pick = (type: number): MediaPayload[] =>
+    media
+      .filter((item) => item.type === type && item.payload !== undefined)
+      .map((item) => item.payload as MediaPayload)
+
+  const images = pick(ITEM_TYPE_IMAGE)
+  const files = pick(ITEM_TYPE_FILE)
+  const voices = pick(ITEM_TYPE_VOICE)
 
   return {
     userId,
@@ -83,6 +94,8 @@ export function toInboundText(
     messageId: message.message_id,
     ...(media.length === 0 ? {} : { media }),
     ...(images.length === 0 ? {} : { images }),
+    ...(files.length === 0 ? {} : { files }),
+    ...(voices.length === 0 ? {} : { voices }),
   }
 }
 

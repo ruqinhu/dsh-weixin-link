@@ -5,7 +5,7 @@
  * 识别，但内容字段没有建模 —— 图片只保留字段名（诊断与后续实现用），不带值。
  */
 
-import type { ImageItem } from './media.js'
+import type { MediaPayload } from './media.js'
 
 /** 入站 item 类型。只有 `1`（文本）带本插件直接读取的载荷。 */
 export const ITEM_TYPE_TEXT = 1
@@ -29,13 +29,16 @@ export interface ItemListEntry {
   type: number
   text_item?: { text: string }
   /** 图片载荷；形状来自 2026-11-06 的真实报文，不是猜测。 */
-  image_item?: ImageItem
+  image_item?: MediaPayload
+  /** 文件载荷；字段名沿用同一 envelope，首次收到文件时会由日志确认。 */
+  file_item?: MediaPayload
+  /** 语音载荷；同上。 */
+  voice_item?: MediaPayload
   /**
    * 其他 item 的字段名不在类型里。
    *
    * 声称知道它们会写下一个从未被真实报文验证过的形状 —— 而猜错的代价是下一次静默
-   * 失败。这里只保留键名，够诊断一次真实消息的骨架，也不会把图片内容或 CDN 地址
-   * 写进日志。
+   * 失败。这里只保留键名，够诊断一次真实消息的骨架，也不会把内容或 CDN 地址写进日志。
    */
   [key: string]: unknown
 }
@@ -68,8 +71,8 @@ export interface MediaItem {
    * 地址与密钥 —— 等于抓了个空。骨架把嵌套结构一起记下来，而值始终不出现。
    */
   shape: unknown
-  /** 图片 item 的原始载荷；只有图片类型带它。 */
-  image?: ImageItem
+  /** 该项的媒体载荷；图片/文件/语音都带，视频暂不处理。 */
+  payload?: MediaPayload
 }
 
 /** 把一个值折叠成「键 + 类型」的骨架，不含任何实际内容。 */
@@ -96,11 +99,12 @@ export function mediaItems(message: WeixinMessage): MediaItem[] {
   const out: MediaItem[] = []
   for (const item of message.item_list ?? []) {
     if (item.type === ITEM_TYPE_TEXT) continue
+    const payload = item.image_item ?? item.file_item ?? item.voice_item
     out.push({
       type: item.type,
       keys: Object.keys(item).filter((key) => key !== 'type'),
       shape: shapeOf(item, 3),
-      ...(item.image_item === undefined ? {} : { image: item.image_item }),
+      ...(payload === undefined ? {} : { payload }),
     })
   }
   return out

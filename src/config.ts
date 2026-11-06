@@ -52,6 +52,17 @@ export interface Config {
    * report is delivered into a channel that stopped listening.
    */
   watchdogIntervalMs: number
+  /** 是否对入站语音做本地转写（silk → wav → faster-whisper）。 */
+  enableStt: boolean
+  /**
+   * 覆盖内置转写命令；`{file}` 会被替换成音频路径。
+   *
+   * 内置助手需要 python3 + faster_whisper + pilk；没有这些的机器可以把这里指向任何
+   * 会打印转写文本的命令。
+   */
+  sttCommand: string
+  /** 单条语音转写的超时。模型加载要几秒，给得比一次网络请求宽。 */
+  sttTimeoutMs: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -107,4 +118,19 @@ export const Config: Schema<Config> = Schema.object({
       'How often to check that the poll loop is still making progress, and restart it when it is ' +
         'not. Zero disables the watchdog.',
     ),
+  enableStt: Schema.boolean()
+    .default(true)
+    .description(
+      'Transcribe inbound voice messages locally (silk → wav → faster-whisper) and hand the text ' +
+        'to the agent. Off means the audio is still saved and the agent is told where it is.',
+    ),
+  sttCommand: Schema.string()
+    .default('')
+    .description(
+      'Override the bundled transcription helper; `{file}` is replaced with the audio path. ' +
+        'Empty uses the bundled python helper, which needs faster_whisper and pilk.',
+    ),
+  sttTimeoutMs: Schema.number()
+    .default(180_000)
+    .description('Give up on one transcription after this long; the message then carries the saved path.'),
 })

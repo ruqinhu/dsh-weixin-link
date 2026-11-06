@@ -27,7 +27,8 @@ import {
 } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
-import { downloadImage, ImageDecodeError, payloadPrefix } from './ilink/media.js'
+import { downloadMedia, ImageDecodeError, payloadPrefix, type MediaPayload } from './ilink/media.js'
+import { transcribeVoice } from './ilink/voice.js'
 import { Heartbeat } from './watchdog/heartbeat.js'
 import { Watchdog } from './watchdog/watchdog.js'
 
@@ -35,6 +36,13 @@ export const name = 'weixin-link'
 
 /** Delay before retrying a failed poll round, so a transport blip cannot spin. */
 const POLL_RETRY_MS = 5_000
+
+/** Whether a message carries anything that needs a download before it can be read. */
+function hasMedia(message: InboundText): boolean {
+  return (
+    (message.images?.length ?? 0) + (message.files?.length ?? 0) + (message.voices?.length ?? 0) > 0
+  )
+}
 
 export function expandTilde(path: string): string {
   if (path === '~') return homedir()
@@ -218,81 +226,135 @@ export default class WeixinLink extends Service {
   }
 
   /**
-   * Download the images carried by a batch, then deliver it.
+   * Download the attachments carried by a batch, then deliver it.
    *
    * Separate from the poll loop because a CDN that takes twenty seconds must not stop
    * the channel from receiving anything else. The batch is delivered in wire order
    * once its downloads settle, so the owner's sequence is still what the agent sees.
    */
-  private async attachAndDispatchImages(messages: readonly InboundText[], at: Date): Promise<void> {
+  private async attachAndDispatchMedia(messages: readonly InboundText[], at: Date): Promise<void> {
     try {
       const enriched: InboundText[] = []
-      for (const message of messages) enriched.push(await this.attachImages(message, at))
+      for (const message of messages) enriched.push(await this.attachMedia(message, at))
       await this.dispatchInbound(enriched)
     } catch (error) {
       // A failed download path must not escape: the message stays readable as the
       // placeholder that says the channel cannot read it.
-      this.log.warn('image attach failed: %s', String(error))
-      this.appendDeliveryTrace(`error stage=image-attach err=${String(error)}`)
+      this.log.warn('media attach failed: %s', String(error))
+      this.appendDeliveryTrace(`error stage=media-attach err=${String(error)}`)
     }
   }
 
   /**
-   * Fetch one message's images into `dataDir/inbox/` and repoint the text at them.
+   * Fetch one message's attachments into `dataDir/inbox/` and repoint the text at them.
    *
    * The text is rebuilt from the owner's own words plus a note naming the saved files,
    * because the placeholder ("this channel can only handle text") would be a lie once
-   * the image is actually on disk. When every download fails the original placeholder
-   * survives — it is already an honest description of what happened.
+   * the bytes are actually on disk. Voice additionally goes through local STT, and a
+   * failed transcription degrades to the saved path rather than to silence.
    */
-  private async attachImages(message: InboundText, at: Date): Promise<InboundText> {
+  private async attachMedia(message: InboundText, at: Date): Promise<InboundText> {
     const images = message.images ?? []
-    if (images.length === 0) return message
+    const files = message.files ?? []
+    const voices = message.voices ?? []
+    if (images.length + files.length + voices.length === 0) return message
 
-    const saved: string[] = []
+    const savedImages: string[] = []
+    const savedFiles: string[] = []
+    const savedVoices: string[] = []
     const failures: string[] = []
     const modes: string[] = []
+    const transcripts: string[] = []
     let decode: { status: number; contentType?: string; prefix: string } | undefined
+
+    const store = async (payload: MediaPayload, kind: 'image' | 'any', tag: string): Promise<string> => {
+      const decoded = await downloadMedia(payload, { kind })
+      const directory = join(this.dataDir, 'inbox')
+      await mkdir(directory, { recursive: true })
+      const target = join(directory, `${message.messageId ?? Date.now()}-${tag}.${decoded.extension}`)
+      await writeFile(target, decoded.bytes, { mode: 0o600 })
+      modes.push(decoded.mode)
+      return target
+    }
+
+    const fail = (error: unknown, tag: string): void => {
+      failures.push((error as Error).message)
+      if (!(error instanceof ImageDecodeError) || decode !== undefined) return
+      // Keep the raw payload when the bytes arrived but did not decode. Without it the
+      // only way to learn the scheme is another message from the owner, and "another
+      // round trip through a phone" is a bad diagnostic tool.
+      decode = {
+        status: error.status,
+        ...(error.contentType === undefined ? {} : { contentType: error.contentType }),
+        prefix: payloadPrefix(error.payload),
+      }
+      void mkdir(join(this.dataDir, 'inbox'), { recursive: true })
+        .then(() =>
+          writeFile(join(this.dataDir, 'inbox', `${message.messageId ?? Date.now()}-${tag}.raw.bin`), error.payload, {
+            mode: 0o600,
+          }),
+        )
+        .catch(() => undefined)
+    }
+
     for (const [index, image] of images.entries()) {
       try {
-        const decoded = await downloadImage(image)
-        const directory = join(this.dataDir, 'inbox')
-        await mkdir(directory, { recursive: true })
-        const target = join(directory, `${message.messageId ?? Date.now()}-${index}.${decoded.extension}`)
-        await writeFile(target, decoded.bytes, { mode: 0o600 })
-        saved.push(target)
-        modes.push(decoded.mode)
+        savedImages.push(await store(image, 'image', `img${index}`))
       } catch (error) {
-        failures.push((error as Error).message)
-        // Keep the raw payload when the bytes arrived but did not decode. Without it
-        // the only way to learn the scheme is another image from the owner, and
-        // "another round trip through a phone" is a bad diagnostic tool.
-        if (error instanceof ImageDecodeError && decode === undefined) {
-          decode = {
-            status: error.status,
-            ...(error.contentType === undefined ? {} : { contentType: error.contentType }),
-            prefix: payloadPrefix(error.payload),
-          }
-          try {
-            const directory = join(this.dataDir, 'inbox')
-            await mkdir(directory, { recursive: true })
-            const raw = join(directory, `${message.messageId ?? Date.now()}-${index}.raw.bin`)
-            await writeFile(raw, error.payload, { mode: 0o600 })
-          } catch {
-            // Best effort: the log line above still records the failure.
-          }
-        }
+        fail(error, `img${index}`)
       }
     }
+    for (const [index, file] of files.entries()) {
+      try {
+        savedFiles.push(await store(file, 'any', `file${index}`))
+      } catch (error) {
+        fail(error, `file${index}`)
+      }
+    }
+    for (const [index, voice] of voices.entries()) {
+      let target: string
+      try {
+        target = await store(voice, 'any', `voice${index}`)
+        savedVoices.push(target)
+      } catch (error) {
+        fail(error, `voice${index}`)
+        continue
+      }
+      if (!this.config.enableStt) continue
+      try {
+        transcripts.push(
+          await transcribeVoice(target, {
+            command: this.config.sttCommand.trim() === '' ? undefined : this.config.sttCommand,
+            timeoutMs: this.config.sttTimeoutMs,
+          }),
+        )
+      } catch (error) {
+        failures.push(`stt: ${(error as Error).message}`)
+      }
+    }
+
     this.appendInboundMedia(message, at, {
-      saved: saved.length,
+      saved: savedImages.length + savedFiles.length + savedVoices.length,
       failures,
       ...(modes.length === 0 ? {} : { modes }),
+      ...(transcripts.length === 0 ? {} : { transcripts: transcripts.length }),
       ...(decode === undefined ? {} : { decode }),
     })
 
-    if (saved.length === 0) return message
-    const note = `（收到 ${images.length} 张图片，已保存到 ${saved.join('、')}；请用 read_image 查看内容。）`
+    const notes: string[] = []
+    if (transcripts.length > 0) notes.push(`（语音转写：${transcripts.join(' / ')}）`)
+    if (savedImages.length > 0) {
+      notes.push(`（收到 ${savedImages.length} 张图片，已保存到 ${savedImages.join('、')}；请用 read_image 查看内容。）`)
+    }
+    if (savedFiles.length > 0) {
+      notes.push(`（收到 ${savedFiles.length} 个文件，已保存到 ${savedFiles.join('、')}；请用 read 或 bash 查看。）`)
+    }
+    if (savedVoices.length > 0 && transcripts.length === 0) {
+      notes.push(`（收到 ${savedVoices.length} 条语音，已保存到 ${savedVoices.join('、')}，但转写失败；请让用户改用文字。）`)
+    }
+    if (notes.length === 0) return message
+
+    const note = notes.join('\n\n')
     return { ...message, text: message.rawText === '' ? note : `${message.rawText}\n\n${note}` }
   }
 
@@ -314,6 +376,7 @@ export default class WeixinLink extends Service {
       saved: number
       failures: readonly string[]
       modes?: readonly string[]
+      transcripts?: number
       decode?: { status: number; contentType?: string; prefix: string }
     },
   ): void {
@@ -323,7 +386,7 @@ export default class WeixinLink extends Service {
       messageId: message.messageId,
       textChars: message.text.length,
       media: message.media?.map((item) => ({ type: item.type, keys: item.keys, shape: item.shape })),
-      ...(outcome === undefined ? {} : { image: outcome }),
+      ...(outcome === undefined ? {} : { attach: outcome }),
     }
     try {
       appendFileSync(join(this.dataDir, 'inbound-media.log'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
@@ -538,13 +601,13 @@ export default class WeixinLink extends Service {
         // Not awaited: a replay may sit in rate-limit backoff for minutes, and the
         // owner's message must not wait behind a parked report's retries.
         void this.replayOnce()
-        // Text first, then images. Downloading inside this loop would let a slow CDN
-        // stall every later inbound; a background task keeps receiving responsive and
-        // still delivers the image messages in wire order.
-        const plain = inbound.filter((message) => (message.images?.length ?? 0) === 0)
-        const withImages = inbound.filter((message) => (message.images?.length ?? 0) > 0)
+        // Text first, then attachments. Downloading inside this loop would let a slow
+        // CDN stall every later inbound; a background task keeps receiving responsive
+        // and still delivers the media messages in wire order.
+        const plain = inbound.filter((message) => !hasMedia(message))
+        const withMedia = inbound.filter((message) => hasMedia(message))
         await this.dispatchInbound(plain)
-        if (withImages.length > 0) void this.attachAndDispatchImages(withImages, now)
+        if (withMedia.length > 0) void this.attachAndDispatchMedia(withMedia, now)
       } catch (error) {
         if (signal.aborted) return
         this.heartbeat.markRound(false, new Date(), error)

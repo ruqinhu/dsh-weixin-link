@@ -1,6 +1,6 @@
 {
   "name": "@ruqinhu/dsh-weixin-link",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Weixin iLink channel for DeepSeek Harness: send, receive, and verify delivery",
   "type": "module",
   "main": "lib/index.js",
@@ -16,6 +16,7 @@
   "files": [
     "lib/**/*.js",
     "lib/types/**/*.d.ts",
+    "scripts/**/*.py",
     "cordis.patch.yml",
     "README.md",
     "README.zh-CN.md"
