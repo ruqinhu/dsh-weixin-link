@@ -27,7 +27,13 @@ import {
 } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
-import { downloadMedia, ImageDecodeError, payloadPrefix, type MediaPayload } from './ilink/media.js'
+import {
+  downloadMedia,
+  ImageDecodeError,
+  payloadPrefix,
+  type DecodeHint,
+  type MediaPayload,
+} from './ilink/media.js'
 import { transcribeVoice } from './ilink/voice.js'
 import { Heartbeat } from './watchdog/heartbeat.js'
 import { Watchdog } from './watchdog/watchdog.js'
@@ -55,6 +61,12 @@ function hasMedia(message: InboundText): boolean {
  * hundred kilobytes, a video is tens of megabytes on a slow link.
  */
 const MEDIA_TIMEOUT_MS = { image: 30_000, file: 60_000, voice: 60_000, video: 120_000 } as const
+
+/** Extension from an inbound `file_name`, or `bin` when it has none. */
+function fileExtension(name: string | undefined): string {
+  const match = /\.([a-z0-9]{1,8})$/i.exec((name ?? '').trim())
+  return match?.[1]?.toLowerCase() ?? 'bin'
+}
 
 export function expandTilde(path: string): string {
   if (path === '~') return homedir()
@@ -286,8 +298,13 @@ export default class WeixinLink extends Service {
       kind: 'image' | 'any',
       tag: string,
       timeoutMs: number,
+      hint?: DecodeHint,
     ): Promise<string> => {
-      const decoded = await downloadMedia(payload, { kind, timeoutMs })
+      const decoded = await downloadMedia(payload, {
+        kind,
+        timeoutMs,
+        ...(hint === undefined ? {} : { hint }),
+      })
       const directory = join(this.dataDir, 'inbox')
       await mkdir(directory, { recursive: true })
       const target = join(directory, `${message.messageId ?? Date.now()}-${tag}.${decoded.extension}`)
@@ -325,7 +342,14 @@ export default class WeixinLink extends Service {
     }
     for (const [index, file] of files.entries()) {
       try {
-        savedFiles.push(await store(file, 'any', `file${index}`, MEDIA_TIMEOUT_MS.file))
+        const extension = fileExtension(file.file_name)
+        savedFiles.push(
+          await store(file, 'any', `file${index}`, MEDIA_TIMEOUT_MS.file, {
+            extension,
+            mime: 'application/octet-stream',
+            kind: 'document',
+          }),
+        )
       } catch (error) {
         fail(error, `file${index}`)
       }
@@ -333,7 +357,11 @@ export default class WeixinLink extends Service {
     for (const [index, voice] of voices.entries()) {
       let target: string
       try {
-        target = await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice)
+        target = await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice, {
+          extension: 'silk',
+          mime: 'audio/silk',
+          kind: 'audio',
+        })
         savedVoices.push(target)
       } catch (error) {
         fail(error, `voice${index}`)
@@ -353,7 +381,13 @@ export default class WeixinLink extends Service {
     }
     for (const [index, video] of videos.entries()) {
       try {
-        savedVideos.push(await store(video, 'any', `video${index}`, MEDIA_TIMEOUT_MS.video))
+        savedVideos.push(
+          await store(video, 'any', `video${index}`, MEDIA_TIMEOUT_MS.video, {
+            extension: 'mp4',
+            mime: 'video/mp4',
+            kind: 'document',
+          }),
+        )
       } catch (error) {
         fail(error, `video${index}`)
       }

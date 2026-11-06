@@ -90,6 +90,32 @@ describe('decodeMediaPayload', () => {
     expect(decoded.mime).toBe('image/png')
   })
 
+  it('keeps a cleanly decrypted container it cannot name, using the declared kind', () => {
+    // 2026-11-06: a voice payload decrypted fine, but its opening bytes matched no
+    // signature, so it was reported as a failure. The official adapter trusts the
+    // declared kind instead of the magic bytes; refusing here loses real messages.
+    const key = randomBytes(16)
+    const unknown = randomBytes(64)
+    const payload = encrypt(unknown, key)
+
+    const decoded = decodeMediaPayload(payload, item(key.toString('base64')), 'any', {
+      extension: 'silk',
+      mime: 'audio/silk',
+      kind: 'audio',
+    })
+
+    expect(decoded.decrypted).toBe(true)
+    expect(decoded.extension).toBe('silk')
+    expect(decoded.kind).toBe('audio')
+    expect(decoded.bytes.equals(unknown)).toBe(true)
+  })
+
+  it('recognises SILK with the leading length byte real WeChat voice carries', () => {
+    const wrapped = Buffer.concat([Buffer.from([0x02]), Buffer.from('#!SILK_V3'), Buffer.alloc(24, 1)])
+
+    expect(identifyMedia(wrapped)).toMatchObject({ kind: 'audio', extension: 'silk' })
+  })
+
   it('still demands an image signature when the caller expects one', () => {
     // A file saved as a JPEG that is not a JPEG is worse than a reported failure.
     expect(() => decodeMediaPayload(SILK, item(), 'image')).toThrow(/not an image/)

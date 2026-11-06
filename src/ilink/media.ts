@@ -21,6 +21,8 @@ export interface MediaPayload {
   thumb_width?: number
   thumb_height?: number
   hd_size?: number
+  /** Original name, carried by `file_item`; the official adapter derives the MIME from it. */
+  file_name?: string
 }
 
 /** Kept as an alias: the first payload modelled was an image. */
@@ -78,8 +80,22 @@ const SIGNATURES: readonly Signature[] = [
   },
   { kind: 'image', mime: 'image/bmp', extension: 'bmp', matches: (b) => b.length > 2 && b[0] === 0x42 && b[1] === 0x4d },
   // Voice: WeChat sends SILK; other deployments may send AMR, WAV, MP3, OGG or M4A.
-  { kind: 'audio', mime: 'audio/silk', extension: 'silk', matches: (b) => b.length > 9 && b.subarray(0, 9).toString('ascii') === '#!SILK_V3' },
-  { kind: 'audio', mime: 'audio/amr', extension: 'amr', matches: (b) => b.length > 5 && b.subarray(0, 5).toString('ascii') === '#!AMR' },
+  {
+    kind: 'audio',
+    mime: 'audio/silk',
+    extension: 'silk',
+    // pilk and the official decoder accept a leading 0x02 length byte before the magic,
+    // which is what real WeChat voice carries.
+    matches: (b) =>
+      b.length > 9 &&
+      (b.subarray(0, 9).toString('ascii') === '#!SILK_V3' || b.subarray(1, 10).toString('ascii') === '#!SILK_V3'),
+  },
+  {
+    kind: 'audio',
+    mime: 'audio/amr',
+    extension: 'amr',
+    matches: (b) => b.length > 5 && (b.subarray(0, 5).toString('ascii') === '#!AMR' || b.subarray(1, 6).toString('ascii') === '#!AMR'),
+  },
   {
     kind: 'audio',
     mime: 'audio/wav',
@@ -278,18 +294,33 @@ const DECRYPTION_MODES: readonly DecryptionMode[] = [
 ]
 
 /**
+ * What the message itself says the payload is.
+ *
+ * The official adapter caches by declared kind (`.silk` for voice, the `file_name`
+ * extension for a document) and never gates on magic bytes. That matters: a voice
+ * payload that decrypted correctly was still rejected here on 2026-11-06 because the
+ * opening bytes matched no signature — a successful decrypt reported as a failure.
+ */
+export interface DecodeHint {
+  extension: string
+  mime: string
+  kind?: MediaKind
+}
+
+/**
  * Turn downloaded bytes into a usable attachment.
  *
  * Two expectations exist. `image` demands an image signature — a file saved as a JPEG
- * that is not a JPEG is worse than a reported failure. `any` accepts a file or an
- * audio container too, and treats unidentified clear bytes as an opaque document,
- * because a log file or a DOCX without its zip header is still a file the owner meant
- * to send.
+ * that is not a JPEG is worse than a reported failure. `any` accepts the first
+ * decryption that succeeds, falling back to the caller's declared kind, which is what
+ * the official adapter does and the only way a voice note survives an unrecognised
+ * container.
  */
 export function decodeMediaPayload(
   payload: Buffer,
   item: MediaPayload,
   expect: 'image' | 'any',
+  hint?: DecodeHint,
 ): DecodedMedia {
   const plain = identifyMedia(payload)
   if (plain !== undefined && (expect === 'any' || plain.kind === 'image')) {
@@ -307,9 +338,9 @@ export function decodeMediaPayload(
       // Unencrypted bytes of a type we cannot name: keep them rather than lose the file.
       return {
         bytes: payload,
-        kind: 'document',
-        mime: 'application/octet-stream',
-        extension: 'bin',
+        kind: hint?.kind ?? 'document',
+        mime: hint?.mime ?? 'application/octet-stream',
+        extension: hint?.extension ?? 'bin',
         decrypted: false,
         mode: 'plain',
       }
@@ -327,15 +358,28 @@ export function decodeMediaPayload(
         continue
       }
       const signature = identifyMedia(decrypted)
-      if (signature === undefined) continue
-      if (expect === 'image' && signature.kind !== 'image') continue
-      return {
-        bytes: decrypted,
-        kind: signature.kind,
-        mime: signature.mime,
-        extension: signature.extension,
-        decrypted: true,
-        mode: attempt.name,
+      if (signature !== undefined) {
+        if (expect === 'image' && signature.kind !== 'image') continue
+        return {
+          bytes: decrypted,
+          kind: signature.kind,
+          mime: signature.mime,
+          extension: signature.extension,
+          decrypted: true,
+          mode: attempt.name,
+        }
+      }
+      // A clean decryption of a container we cannot name. Trust the declared kind, as
+      // the official adapter does; refusing here is how a real voice note gets lost.
+      if (expect === 'any') {
+        return {
+          bytes: decrypted,
+          kind: hint?.kind ?? 'document',
+          mime: hint?.mime ?? 'application/octet-stream',
+          extension: hint?.extension ?? 'bin',
+          decrypted: true,
+          mode: attempt.name,
+        }
       }
     }
   }
@@ -345,6 +389,8 @@ export function decodeMediaPayload(
 export interface DownloadOptions {
   /** What the caller can use: `image` for a picture, `any` for files, voice and video. */
   kind?: 'image' | 'any'
+  /** Declared kind of the payload, used when decryption succeeds without a signature. */
+  hint?: DecodeHint
   /** Overrides the official CDN base; the encrypted query parameter is appended to it. */
   cdnBaseUrl?: string
   timeoutMs?: number
@@ -384,7 +430,7 @@ export async function downloadMedia(item: MediaPayload, options: DownloadOptions
 
   const contentType = response.headers.get('content-type') ?? undefined
   try {
-    return decodeMediaPayload(bytes, item, options.kind ?? 'any')
+    return decodeMediaPayload(bytes, item, options.kind ?? 'any', options.hint)
   } catch (error) {
     throw new ImageDecodeError((error as Error).message, bytes, contentType, response.status)
   }
