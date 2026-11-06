@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { appendFileSync, writeFileSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { Config } from './config.js'
 import { IlinkClient } from './ilink/client.js'
 import { sendText } from './ilink/send.js'
@@ -26,6 +27,7 @@ import {
 } from './bridge/session.js'
 import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
+import { downloadImage } from './ilink/media.js'
 import { Heartbeat } from './watchdog/heartbeat.js'
 import { Watchdog } from './watchdog/watchdog.js'
 
@@ -216,6 +218,59 @@ export default class WeixinLink extends Service {
   }
 
   /**
+   * Download the images carried by a batch, then deliver it.
+   *
+   * Separate from the poll loop because a CDN that takes twenty seconds must not stop
+   * the channel from receiving anything else. The batch is delivered in wire order
+   * once its downloads settle, so the owner's sequence is still what the agent sees.
+   */
+  private async attachAndDispatchImages(messages: readonly InboundText[], at: Date): Promise<void> {
+    try {
+      const enriched: InboundText[] = []
+      for (const message of messages) enriched.push(await this.attachImages(message, at))
+      await this.dispatchInbound(enriched)
+    } catch (error) {
+      // A failed download path must not escape: the message stays readable as the
+      // placeholder that says the channel cannot read it.
+      this.log.warn('image attach failed: %s', String(error))
+      this.appendDeliveryTrace(`error stage=image-attach err=${String(error)}`)
+    }
+  }
+
+  /**
+   * Fetch one message's images into `dataDir/inbox/` and repoint the text at them.
+   *
+   * The text is rebuilt from the owner's own words plus a note naming the saved files,
+   * because the placeholder ("this channel can only handle text") would be a lie once
+   * the image is actually on disk. When every download fails the original placeholder
+   * survives — it is already an honest description of what happened.
+   */
+  private async attachImages(message: InboundText, at: Date): Promise<InboundText> {
+    const images = message.images ?? []
+    if (images.length === 0) return message
+
+    const saved: string[] = []
+    const failures: string[] = []
+    for (const [index, image] of images.entries()) {
+      try {
+        const decoded = await downloadImage(image)
+        const directory = join(this.dataDir, 'inbox')
+        await mkdir(directory, { recursive: true })
+        const target = join(directory, `${message.messageId ?? Date.now()}-${index}.${decoded.extension}`)
+        await writeFile(target, decoded.bytes, { mode: 0o600 })
+        saved.push(target)
+      } catch (error) {
+        failures.push((error as Error).message)
+      }
+    }
+    this.appendInboundMedia(message, at, { saved: saved.length, failures })
+
+    if (saved.length === 0) return message
+    const note = `（收到 ${images.length} 张图片，已保存到 ${saved.join('、')}；请用 read_image 查看内容。）`
+    return { ...message, text: message.rawText === '' ? note : `${message.rawText}\n\n${note}` }
+  }
+
+  /**
    * Record one inbound non-text message as a JSONL line.
    *
    * A file rather than a logger call for the same reason as the delivery trace:
@@ -226,13 +281,18 @@ export default class WeixinLink extends Service {
    *
    * Failures are swallowed: diagnostics must never stop the channel from receiving.
    */
-  private appendInboundMedia(message: InboundText, at: Date): void {
+  private appendInboundMedia(
+    message: InboundText,
+    at: Date,
+    outcome?: { saved: number; failures: readonly string[] },
+  ): void {
     const record = {
       at: at.toISOString(),
       userId: message.userId,
       messageId: message.messageId,
       textChars: message.text.length,
       media: message.media?.map((item) => ({ type: item.type, keys: item.keys, shape: item.shape })),
+      ...(outcome === undefined ? {} : { image: outcome }),
     }
     try {
       appendFileSync(join(this.dataDir, 'inbound-media.log'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
@@ -447,7 +507,13 @@ export default class WeixinLink extends Service {
         // Not awaited: a replay may sit in rate-limit backoff for minutes, and the
         // owner's message must not wait behind a parked report's retries.
         void this.replayOnce()
-        await this.dispatchInbound(inbound)
+        // Text first, then images. Downloading inside this loop would let a slow CDN
+        // stall every later inbound; a background task keeps receiving responsive and
+        // still delivers the image messages in wire order.
+        const plain = inbound.filter((message) => (message.images?.length ?? 0) === 0)
+        const withImages = inbound.filter((message) => (message.images?.length ?? 0) > 0)
+        await this.dispatchInbound(plain)
+        if (withImages.length > 0) void this.attachAndDispatchImages(withImages, now)
       } catch (error) {
         if (signal.aborted) return
         this.heartbeat.markRound(false, new Date(), error)

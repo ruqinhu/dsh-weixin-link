@@ -25,6 +25,7 @@ describe('toInboundText', () => {
     expect(toInboundText(message(), { echoOwnMessages: false })).toEqual({
       userId: 'u1',
       text: 'hello',
+      rawText: 'hello',
       contextToken: 'tok',
       messageId: undefined,
     })

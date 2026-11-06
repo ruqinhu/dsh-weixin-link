@@ -36,7 +36,8 @@ context, so the last one would classify every turn as context and deliver nothin
 | Duplicate sends | identical text within 10 min counts as delivered; a manual `weixin_push` stands auto-delivery down | an LLM "is this worth it" gate: a round trip per message, and a silent "don't send" is indistinguishable from a crash | duplicates outside the window still go out |
 | Empty turns | `本次无产出（timestamp）` | silence: "ran and failed" looks like "never ran" | one message that may say nothing |
 | Failed turns | `⚠️ 回合未完成（reason，timestamp）：本次没有可投递的内容。`, at most one per session per hour | sending the partial text: a fragment reads like an answer; skipping: a crashed 07:00 report looks like a day with no schedule | the hourly floor is in memory, so a restart can add one |
-| Non-text messages | folded into a placeholder the agent can act on (`（收到 2 张图片，但当前通道只能处理文本，内容未读取…）`), with the wire field names appended to `inbound-media.log` | dropping them silently: on 2026-11-04 an image was sent twice and neither the agent nor the log saw anything, so the owner gave up ("不改了就这样吧") | the content is still unread — the placeholder says so rather than pretending |
+| Images | downloaded from the CDN, AES-CBC decrypted, saved to `inbox/`, and the message names the files for `read_image` | dropping them silently: on 2026-11-04 an image was sent twice and neither the agent nor the log saw anything, so the owner gave up ("不改了就这样吧") | one download per image inside a background task, and a decrypt failure degrades to the placeholder |
+| Other media | folded into a placeholder the agent can act on (`（收到 1 个文件…）`), with the wire field skeleton appended to `inbound-media.log` | pretending to have read a voice note or a file: the model would answer about content nobody read | content still unread — the placeholder says so |
 | Receive vs send | replay on its own timer + single-flight; bootstrap does not await it | awaiting replay inside the poll loop: a 30/60/120 s backoff means 3.5 minutes deaf | replay is serial — one slow send delays the rest |
 | Liveness | rewrite `state/heartbeat.json` every round; judge every 60 s; restart when no round has been **attempted** for 3 budgets (≥ 90 s) | judging by last success: a loop failing every round gets restarted every tick, aborting the retry in flight | cannot tell "hung" from "paused" |
 | Replay deletion | delete only on a provably permanent failure | deleting on "anything not NEEDS_INBOUND/RATE_LIMITED": `ret:-2 prepare failed` is transient, and that rule ate a 12:40 report | queue keeps entries that may never send |
@@ -134,7 +135,8 @@ project/user `.env`, and reading the environment directly would shadow it.
 | `delivery-trace.log` | one line per turn decision, **including skips and why** |
 | `outbox/` | parked messages awaiting a token |
 | `state/heartbeat.json` | last attempt/success, failures, inbound count, restarts |
-| `inbound-media.log` | one line per inbound non-text message: item types and field **names** only (no URLs, keys or bytes) |
+| `inbound-media.log` | one line per inbound non-text message: item types, field **names**/skeleton, and the image save outcome (no URLs, keys or bytes) |
+| `inbox/` | images downloaded from inbound messages, named `<messageId>-<n>.<ext>`, mode 0600 |
 
 ```
 send session=... turn=12 kind=turn len=63

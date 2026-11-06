@@ -5,7 +5,9 @@
  * 识别，但内容字段没有建模 —— 图片只保留字段名（诊断与后续实现用），不带值。
  */
 
-/** 入站 item 类型。只有 `1`（文本）带本插件读取的载荷。 */
+import type { ImageItem } from './media.js'
+
+/** 入站 item 类型。只有 `1`（文本）带本插件直接读取的载荷。 */
 export const ITEM_TYPE_TEXT = 1
 /** 图片。当前通道不读内容，只把它算作「收到了一条非文本消息」。 */
 export const ITEM_TYPE_IMAGE = 2
@@ -26,6 +28,8 @@ export interface ItemListEntry {
   /** 1 = text, 2 = image, 3 = file, 4 = voice, 5 = video */
   type: number
   text_item?: { text: string }
+  /** 图片载荷；形状来自 2026-11-06 的真实报文，不是猜测。 */
+  image_item?: ImageItem
   /**
    * 其他 item 的字段名不在类型里。
    *
@@ -64,6 +68,8 @@ export interface MediaItem {
    * 地址与密钥 —— 等于抓了个空。骨架把嵌套结构一起记下来，而值始终不出现。
    */
   shape: unknown
+  /** 图片 item 的原始载荷；只有图片类型带它。 */
+  image?: ImageItem
 }
 
 /** 把一个值折叠成「键 + 类型」的骨架，不含任何实际内容。 */
@@ -94,6 +100,7 @@ export function mediaItems(message: WeixinMessage): MediaItem[] {
       type: item.type,
       keys: Object.keys(item).filter((key) => key !== 'type'),
       shape: shapeOf(item, 3),
+      ...(item.image_item === undefined ? {} : { image: item.image_item }),
     })
   }
   return out

@@ -1,11 +1,26 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ImageItem } from '../ilink/media.js'
 import type { MediaItem, WeixinMessage } from '../ilink/types.js'
-import { describeMedia, mediaItems, messageText, MESSAGE_TYPE_BOT } from '../ilink/types.js'
+import {
+  describeMedia,
+  ITEM_TYPE_IMAGE,
+  mediaItems,
+  messageText,
+  MESSAGE_TYPE_BOT,
+} from '../ilink/types.js'
 
 export interface InboundText {
   userId: string
+  /** 最终要交给模型的消息正文（媒体消息在无法读取内容时会带上占位说明）。 */
   text: string
+  /**
+   * owner 自己写下的原文，不含任何占位说明。
+   *
+   * 图片下载成功后，调用方要用它重建正文：`原文 + 图片已保存`，而不是把占位说明
+   * 和真实图片路径拼在一起。
+   */
+  rawText: string
   contextToken: string
   /** Server-side id, used to de-duplicate a re-delivered poll batch. */
   messageId?: string
@@ -16,6 +31,8 @@ export interface InboundText {
    * 后续真正支持图片留下真实的协议骨架。
    */
   media?: readonly MediaItem[]
+  /** 可直接下载的图片载荷；下载成功后由调用方替换 `text`。 */
+  images?: readonly ImageItem[]
 }
 
 /**
@@ -54,12 +71,18 @@ export function toInboundText(
         ? text
         : `${text}\n\n（同一条消息还含${describeMedia(media)}，内容未读取）`
 
+  const images = media
+    .filter((item) => item.type === ITEM_TYPE_IMAGE && item.image !== undefined)
+    .map((item) => item.image as ImageItem)
+
   return {
     userId,
     text: composed,
+    rawText: text,
     contextToken,
     messageId: message.message_id,
     ...(media.length === 0 ? {} : { media }),
+    ...(images.length === 0 ? {} : { images }),
   }
 }
 
