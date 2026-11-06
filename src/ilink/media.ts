@@ -25,9 +25,7 @@ export interface MediaPayload {
   file_name?: string
 }
 
-/** Kept as an alias: the first payload modelled was an image. */
-export type ImageItem = MediaPayload
-
+/** What the bytes are. */
 export type MediaKind = 'image' | 'audio' | 'document'
 
 export interface MediaSignature {
@@ -63,60 +61,48 @@ interface Signature extends MediaSignature {
   matches: (bytes: Buffer) => boolean
 }
 
+// Magic-byte predicates, one per container. Kept separate so the table above stays
+// readable and each check reads as the format it recognises.
+const jpeg = (b: Buffer): boolean => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff
+const png = (b: Buffer): boolean =>
+  b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+const gif = (b: Buffer): boolean => b.length > 6 && b.subarray(0, 6).toString('ascii').match(/^GIF8[79]a$/) !== null
+const webp = (b: Buffer): boolean =>
+  b.length > 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP'
+const bmp = (b: Buffer): boolean => b.length > 2 && b[0] === 0x42 && b[1] === 0x4d
+// pilk and the official decoder accept a leading 0x02 length byte before the magic,
+// which is what real WeChat voice carries.
+const silk = (b: Buffer): boolean =>
+  b.length > 9 &&
+  (b.subarray(0, 9).toString('ascii') === '#!SILK_V3' || b.subarray(1, 10).toString('ascii') === '#!SILK_V3')
+const amr = (b: Buffer): boolean =>
+  b.length > 5 && (b.subarray(0, 5).toString('ascii') === '#!AMR' || b.subarray(1, 6).toString('ascii') === '#!AMR')
+const wav = (b: Buffer): boolean =>
+  b.length > 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WAVE'
+const mp3 = (b: Buffer): boolean =>
+  b.length > 3 &&
+  (b.subarray(0, 3).toString('ascii') === 'ID3' || (b[0] === 0xff && b[1] !== undefined && (b[1] & 0xe0) === 0xe0))
+const ogg = (b: Buffer): boolean => b.length > 4 && b.subarray(0, 4).toString('ascii') === 'OggS'
+const m4a = (b: Buffer): boolean => b.length > 12 && b.subarray(4, 8).toString('ascii') === 'ftyp'
+const pdf = (b: Buffer): boolean => b.length > 5 && b.subarray(0, 5).toString('ascii') === '%PDF-'
+const zip = (b: Buffer): boolean => b.length > 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04
 const SIGNATURES: readonly Signature[] = [
-  { kind: 'image', mime: 'image/jpeg', extension: 'jpg', matches: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
-  {
-    kind: 'image',
-    mime: 'image/png',
-    extension: 'png',
-    matches: (b) => b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
-  },
-  { kind: 'image', mime: 'image/gif', extension: 'gif', matches: (b) => b.length > 6 && b.subarray(0, 6).toString('ascii').match(/^GIF8[79]a$/) !== null },
-  {
-    kind: 'image',
-    mime: 'image/webp',
-    extension: 'webp',
-    matches: (b) => b.length > 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP',
-  },
-  { kind: 'image', mime: 'image/bmp', extension: 'bmp', matches: (b) => b.length > 2 && b[0] === 0x42 && b[1] === 0x4d },
+  { kind: 'image', mime: 'image/jpeg', extension: 'jpg', matches: jpeg },
+  { kind: 'image', mime: 'image/png', extension: 'png', matches: png },
+  { kind: 'image', mime: 'image/gif', extension: 'gif', matches: gif },
+  { kind: 'image', mime: 'image/webp', extension: 'webp', matches: webp },
+  { kind: 'image', mime: 'image/bmp', extension: 'bmp', matches: bmp },
   // Voice: WeChat sends SILK; other deployments may send AMR, WAV, MP3, OGG or M4A.
-  {
-    kind: 'audio',
-    mime: 'audio/silk',
-    extension: 'silk',
-    // pilk and the official decoder accept a leading 0x02 length byte before the magic,
-    // which is what real WeChat voice carries.
-    matches: (b) =>
-      b.length > 9 &&
-      (b.subarray(0, 9).toString('ascii') === '#!SILK_V3' || b.subarray(1, 10).toString('ascii') === '#!SILK_V3'),
-  },
-  {
-    kind: 'audio',
-    mime: 'audio/amr',
-    extension: 'amr',
-    matches: (b) => b.length > 5 && (b.subarray(0, 5).toString('ascii') === '#!AMR' || b.subarray(1, 6).toString('ascii') === '#!AMR'),
-  },
-  {
-    kind: 'audio',
-    mime: 'audio/wav',
-    extension: 'wav',
-    matches: (b) => b.length > 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WAVE',
-  },
-  {
-    kind: 'audio',
-    mime: 'audio/mpeg',
-    extension: 'mp3',
-    matches: (b) =>
-      b.length > 3 &&
-      (b.subarray(0, 3).toString('ascii') === 'ID3' || (b[0] === 0xff && b[1] !== undefined && (b[1] & 0xe0) === 0xe0)),
-  },
-  { kind: 'audio', mime: 'audio/ogg', extension: 'ogg', matches: (b) => b.length > 4 && b.subarray(0, 4).toString('ascii') === 'OggS' },
-  { kind: 'audio', mime: 'audio/mp4', extension: 'm4a', matches: (b) => b.length > 12 && b.subarray(4, 8).toString('ascii') === 'ftyp' },
+  { kind: 'audio', mime: 'audio/silk', extension: 'silk', matches: silk },
+  { kind: 'audio', mime: 'audio/amr', extension: 'amr', matches: amr },
+  { kind: 'audio', mime: 'audio/wav', extension: 'wav', matches: wav },
+  { kind: 'audio', mime: 'audio/mpeg', extension: 'mp3', matches: mp3 },
+  { kind: 'audio', mime: 'audio/ogg', extension: 'ogg', matches: ogg },
+  { kind: 'audio', mime: 'audio/mp4', extension: 'm4a', matches: m4a },
   // Documents: PDF, and the ZIP container that DOCX/XLSX/PPTX share.
-  { kind: 'document', mime: 'application/pdf', extension: 'pdf', matches: (b) => b.length > 5 && b.subarray(0, 5).toString('ascii') === '%PDF-' },
-  { kind: 'document', mime: 'application/zip', extension: 'zip', matches: (b) => b.length > 4 && b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04 },
+  { kind: 'document', mime: 'application/pdf', extension: 'pdf', matches: pdf },
+  { kind: 'document', mime: 'application/zip', extension: 'zip', matches: zip },
 ]
-
 /** Identify a payload by its magic bytes, or `undefined` when nothing matches. */
 export function identifyMedia(bytes: Buffer): MediaSignature | undefined {
   for (const signature of SIGNATURES) {
@@ -125,9 +111,6 @@ export function identifyMedia(bytes: Buffer): MediaSignature | undefined {
   }
   return undefined
 }
-
-/** Image-only alias kept for the call sites that predate files and voice. */
-export const identifyImage = identifyMedia
 
 /** Official iLink CDN base (`gateway/platforms/weixin.py: WEIXIN_CDN_BASE_URL`). */
 export const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
@@ -187,19 +170,6 @@ export function resolveMediaUrl(params: {
 }
 
 /**
- * Join the CDN URL with its encrypted query parameter.
- *
- * Kept for the plain join it describes; the download path uses {@link resolveMediaUrl},
- * which is what the official adapter does.
- */
-export function buildMediaUrl(fullUrl: string, queryParam?: string): string {
-  if (queryParam === undefined || queryParam === '') return fullUrl
-  if (queryParam.startsWith('?')) return `${fullUrl}${queryParam}`
-  const separator = fullUrl.includes('?') ? '&' : '?'
-  return `${fullUrl}${separator}${queryParam}`
-}
-
-/**
  * Key candidates, mirroring the official `_parse_aes_key`.
  *
  * Three encodings exist and the official code distinguishes them by decoded length: a
@@ -222,10 +192,13 @@ function keyCandidates(aesKeyB64: string | undefined, rawAeskeyHex: string | und
 
   if (aesKeyB64 !== undefined && aesKeyB64.trim() !== '') {
     const value = aesKeyB64.trim()
-    push(hex(value))
+    // Base64 first: this field *is* base64, and a base64 string made only of hex
+    // characters (e.g. "abcdef…") would otherwise be decoded as hex and produce a wrong
+    // key. The official `_parse_aes_key` never treats this field as hex.
     const decoded = Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
     if (decoded.length === 16) push(decoded)
     else if (decoded.length === 32) push(hex(decoded.toString('ascii')) ?? decoded)
+    else push(hex(value))
   }
   return out.filter((key) => key.length === 16 || key.length === 24 || key.length === 32)
 }
@@ -238,7 +211,7 @@ function keyCandidates(aesKeyB64: string | undefined, rawAeskeyHex: string | und
  * phone to find out what the bytes look like is a worse trade than one 0600 file that
  * gets deleted after the scheme is understood.
  */
-export class ImageDecodeError extends Error {
+export class MediaDecodeError extends Error {
   constructor(
     message: string,
     readonly payload: Buffer,
@@ -246,7 +219,7 @@ export class ImageDecodeError extends Error {
     readonly status: number,
   ) {
     super(message)
-    this.name = 'ImageDecodeError'
+    this.name = 'MediaDecodeError'
   }
 }
 
@@ -307,6 +280,17 @@ export interface DecodeHint {
   kind?: MediaKind
 }
 
+/** An attachment whose container we cannot name: trust the caller's declared kind. */
+function unnamed(bytes: Buffer, hint: DecodeHint | undefined, decrypted: boolean, mode: string): DecodedMedia {
+  return {
+    bytes,
+    kind: hint?.kind ?? 'document',
+    mime: hint?.mime ?? 'application/octet-stream',
+    extension: hint?.extension ?? 'bin',
+    decrypted,
+    mode,
+  }
+}
 /**
  * Turn downloaded bytes into a usable attachment.
  *
@@ -336,14 +320,7 @@ export function decodeMediaPayload(
   if (keys.length === 0) {
     if (expect === 'any') {
       // Unencrypted bytes of a type we cannot name: keep them rather than lose the file.
-      return {
-        bytes: payload,
-        kind: hint?.kind ?? 'document',
-        mime: hint?.mime ?? 'application/octet-stream',
-        extension: hint?.extension ?? 'bin',
-        decrypted: false,
-        mode: 'plain',
-      }
+      return unnamed(payload, hint, false, 'plain')
     }
     throw new Error('media payload is encrypted but carries no usable aes key')
   }
@@ -371,16 +348,7 @@ export function decodeMediaPayload(
       }
       // A clean decryption of a container we cannot name. Trust the declared kind, as
       // the official adapter does; refusing here is how a real voice note gets lost.
-      if (expect === 'any') {
-        return {
-          bytes: decrypted,
-          kind: hint?.kind ?? 'document',
-          mime: hint?.mime ?? 'application/octet-stream',
-          extension: hint?.extension ?? 'bin',
-          decrypted: true,
-          mode: attempt.name,
-        }
-      }
+      if (expect === 'any') return unnamed(decrypted, hint, true, attempt.name)
     }
   }
   throw new Error('media payload did not decode with any key encoding')
@@ -432,11 +400,6 @@ export async function downloadMedia(item: MediaPayload, options: DownloadOptions
   try {
     return decodeMediaPayload(bytes, item, options.kind ?? 'any', options.hint)
   } catch (error) {
-    throw new ImageDecodeError((error as Error).message, bytes, contentType, response.status)
+    throw new MediaDecodeError((error as Error).message, bytes, contentType, response.status)
   }
-}
-
-/** Image-only wrapper, kept so the image call sites read as they did. */
-export function downloadImage(item: MediaPayload, options: Omit<DownloadOptions, 'kind'> = {}): Promise<DecodedMedia> {
-  return downloadMedia(item, { ...options, kind: 'image' })
 }

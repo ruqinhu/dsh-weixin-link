@@ -53,7 +53,7 @@ describe('toInboundText', () => {
     })
 
     expect(inbound?.text).toContain('图片')
-    expect(inbound?.text).toContain('未读取')
+    expect(inbound?.text).toContain('未能读取')
     expect(inbound?.media).toMatchObject([{ type: 2, keys: ['image_item'] }])
   })
 

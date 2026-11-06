@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { createCipheriv, randomBytes } from 'node:crypto'
 import {
-  buildMediaUrl,
   decodeMediaPayload,
   downloadMedia,
   identifyMedia,
   MAX_MEDIA_BYTES,
   payloadPrefix,
-  ImageDecodeError,
+  MediaDecodeError,
   resolveMediaUrl,
 } from '../src/ilink/media.js'
 import { silkToWavArgs } from '../src/ilink/voice.js'
@@ -143,8 +142,8 @@ describe('decodeMediaPayload', () => {
       )
       expect.unreachable()
     } catch (error) {
-      expect(error).toBeInstanceOf(ImageDecodeError)
-      const decodeError = error as ImageDecodeError
+      expect(error).toBeInstanceOf(MediaDecodeError)
+      const decodeError = error as MediaDecodeError
       expect(decodeError.payload.length).toBeGreaterThan(0)
       expect(payloadPrefix(decodeError.payload, 4)).toMatch(/^[0-9a-f]{8}$/)
     }
@@ -210,14 +209,6 @@ describe('resolveMediaUrl', () => {
   })
 })
 
-describe('buildMediaUrl', () => {
-  it('appends the encrypted query parameter with the right separator', () => {
-    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', 'a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?a=1')
-    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x?z=0', 'a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?z=0&a=1')
-    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', '?a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?a=1')
-    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', '')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x')
-  })
-})
 
 describe('voice helpers', () => {
   it('builds the silk→wav step with the sample rate Hermes settled on', () => {

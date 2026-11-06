@@ -75,10 +75,10 @@ export function toInboundText(
 
   const composed =
     text === ''
-      ? `（收到${describeMedia(media)}，但当前通道只能处理文本，内容未读取；请让用户改用文字描述或发链接。）`
+      ? `（收到${describeMedia(media)}，但本次未能读取其内容；请让用户改用文字描述或发链接。）`
       : media.length === 0
         ? text
-        : `${text}\n\n（同一条消息还含${describeMedia(media)}，内容未读取）`
+        : `${text}\n\n（同一条消息还含${describeMedia(media)}，本次未能读取其内容）`
 
   const pick = (type: number): MediaPayload[] =>
     media

@@ -25,7 +25,7 @@ export const MESSAGE_TYPE_BOT = 2
 export const MESSAGE_STATE_FINISH = 2
 
 export interface ItemListEntry {
-  /** 1 = text, 2 = image, 3 = file, 4 = voice, 5 = video */
+  /** 官方编号：1=文本、2=图片、3=语音、4=文件、5=视频（见 `ITEM_TYPE_*`，注意语音在文件前）。 */
   type: number
   text_item?: { text: string }
   /** 图片载荷；形状来自 2026-11-06 的真实报文，不是猜测。 */

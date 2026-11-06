@@ -123,7 +123,8 @@ token 通过 DSH 凭据库读取（`ctx.credentials.resolve()`），不读 `proc
 | `watchdogIntervalMs` | `60000` | 存活检查间隔；`0` 关闭 |
 | `enableStt` | `true` | 是否本地转写入站语音；关闭则只保存文件 |
 | `sttCommand` | `""` | 覆盖内置转写命令；`{file}` 会被替换 |
-| `sttTimeoutMs` | `180000` | 单条转写超时 |
+| `sttTimeoutMs` | `90000` | 单条转写超时 |
+| `sttPrompt` | 简体中文提示 | 初始提示；不设时 `base` 会输出繁体 |
 
 ## 9. 工具与文件
 

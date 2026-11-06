@@ -30,7 +30,7 @@ import { registerTools, type StatusReport } from './tools.js'
 import { isDeliverable, undeliverableReason } from './health.js'
 import {
   downloadMedia,
-  ImageDecodeError,
+  MediaDecodeError,
   payloadPrefix,
   type DecodeHint,
   type MediaPayload,
@@ -316,7 +316,7 @@ export default class WeixinLink extends Service {
 
     const fail = (error: unknown, tag: string): void => {
       failures.push((error as Error).message)
-      if (!(error instanceof ImageDecodeError) || decode !== undefined) return
+      if (!(error instanceof MediaDecodeError) || decode !== undefined) return
       // Keep the raw payload when the bytes arrived but did not decode. Without it the
       // only way to learn the scheme is another message from the owner, and "another
       // round trip through a phone" is a bad diagnostic tool.
@@ -334,51 +334,55 @@ export default class WeixinLink extends Service {
         .catch(() => undefined)
     }
 
-    for (const [index, image] of images.entries()) {
-      try {
-        savedImages.push(await store(image, 'image', `img${index}`, MEDIA_TIMEOUT_MS.image))
-      } catch (error) {
-        fail(error, `img${index}`)
-      }
-    }
-    for (const [index, file] of files.entries()) {
-      try {
-        const extension = fileExtension(file.file_name)
-        savedFiles.push(
-          await store(file, 'any', `file${index}`, MEDIA_TIMEOUT_MS.file, {
-            extension,
-            mime: 'application/octet-stream',
-            kind: 'document',
-          }),
-        )
-      } catch (error) {
-        fail(error, `file${index}`)
-      }
-    }
-    for (const [index, voice] of voices.entries()) {
-      try {
-        savedVoices.push(
-          await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice, {
-            extension: 'silk',
-            mime: 'audio/silk',
-            kind: 'audio',
-          }),
-        )
-      } catch (error) {
-        fail(error, `voice${index}`)
-      }
-    }
-    for (const [index, video] of videos.entries()) {
-      try {
-        savedVideos.push(
-          await store(video, 'any', `video${index}`, MEDIA_TIMEOUT_MS.video, {
-            extension: 'mp4',
-            mime: 'video/mp4',
-            kind: 'document',
-          }),
-        )
-      } catch (error) {
-        fail(error, `video${index}`)
+    // One table, four kinds: adding a fifth used to mean editing five places (loop,
+    // timeout map, hint, saved counter, note text) and missing one silently.
+    const specs: readonly {
+      tag: string
+      items: readonly MediaPayload[]
+      kind: 'image' | 'any'
+      timeoutMs: number
+      saved: string[]
+      hint?: (payload: MediaPayload) => DecodeHint
+    }[] = [
+      { tag: 'img', items: images, kind: 'image', timeoutMs: MEDIA_TIMEOUT_MS.image, saved: savedImages },
+      {
+        tag: 'file',
+        items: files,
+        kind: 'any',
+        timeoutMs: MEDIA_TIMEOUT_MS.file,
+        saved: savedFiles,
+        hint: (payload) => ({
+          extension: fileExtension(payload.file_name),
+          mime: 'application/octet-stream',
+          kind: 'document',
+        }),
+      },
+      {
+        tag: 'voice',
+        items: voices,
+        kind: 'any',
+        timeoutMs: MEDIA_TIMEOUT_MS.voice,
+        saved: savedVoices,
+        hint: () => ({ extension: 'silk', mime: 'audio/silk', kind: 'audio' }),
+      },
+      {
+        tag: 'video',
+        items: videos,
+        kind: 'any',
+        timeoutMs: MEDIA_TIMEOUT_MS.video,
+        saved: savedVideos,
+        hint: () => ({ extension: 'mp4', mime: 'video/mp4', kind: 'document' }),
+      },
+    ]
+
+    for (const spec of specs) {
+      for (const [index, payload] of spec.items.entries()) {
+        const tag = `${spec.tag}${index}`
+        try {
+          spec.saved.push(await store(payload, spec.kind, tag, spec.timeoutMs, spec.hint?.(payload)))
+        } catch (error) {
+          fail(error, tag)
+        }
       }
     }
 
@@ -428,10 +432,19 @@ export default class WeixinLink extends Service {
       notes.push(`（收到 ${savedVideos.length} 段视频，已保存到 ${savedVideos.join('、')}；如需分析可用 bash 取帧。）`)
     }
     if (savedVoices.length > 0 && transcripts.length === 0) {
-      notes.push(`（收到 ${savedVoices.length} 条语音，已保存到 ${savedVoices.join('、')}，但转写失败；请让用户改用文字。）`)
+      // Say which of the two happened. Reporting a deliberate `enableStt: false` as a
+      // transcription failure sends the owner chasing a bug that does not exist.
+      const why = !this.config.enableStt
+        ? '本通道未开启转写'
+        : (sttFailures[0]?.replace(/^stt:\s*/, '') ?? '转写没有产出可用文本')
+      notes.push(`（收到 ${savedVoices.length} 条语音，已保存到 ${savedVoices.join('、')}；${why}，请让用户改用文字。）`)
     }
-    if (notes.length === 0) return message
-
+    if (notes.length === 0) {
+      // Nothing could be attached: keep the placeholder, but make it actionable by
+      // naming the reason. A generic "could not read it" leaves the owner re-sending.
+      if (failures.length === 0) return message
+      return { ...message, text: `${message.text}\n\n（附件未能读取：${(failures[0] as string).slice(0, 120)}）` }
+    }
     const note = notes.join('\n\n')
     return { ...message, text: message.rawText === '' ? note : `${message.rawText}\n\n${note}` }
   }

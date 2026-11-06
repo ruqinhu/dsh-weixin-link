@@ -126,7 +126,8 @@ project/user `.env`, and reading the environment directly would shadow it.
 | `watchdogIntervalMs` | `60000` | liveness check interval; `0` disables |
 | `enableStt` | `true` | transcribe inbound voice locally; off keeps the file only |
 | `sttCommand` | `""` | override the bundled helper; `{file}` is substituted |
-| `sttTimeoutMs` | `180000` | give up on one transcription after this long |
+| `sttTimeoutMs` | `90000` | give up on one transcription after this long |
+| `sttPrompt` | simplified-Chinese hint | initial prompt; without one `base` answers Mandarin in Traditional characters |
 
 ## 9. Tools and files
 

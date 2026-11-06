@@ -40,8 +40,8 @@ export interface SilkArgs {
 /**
  * Arguments for the silk→wav conversion step.
  *
- * 24 kHz is what the Hermes skill measured as the right rate for WeChat voice; a
- * different rate resamples the audio and costs accuracy on Mandarin.
+ * 24 kHz is `pilk.silk_to_wav`'s own default, which the official adapter relies on;
+ * a different rate resamples the audio and costs accuracy on Mandarin.
  */
 export function silkToWavArgs(silk: string, wav: string): SilkArgs {
   return { silk, wav, rate: 24_000 }

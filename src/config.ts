@@ -136,9 +136,10 @@ export const Config: Schema<Config> = Schema.object({
     .default(90_000)
     .description('Give up on one transcription after this long; the message then carries the saved path.'),
   sttPrompt: Schema.string()
-    .default('')
+    .default('以下是简体中文普通话的对话内容。')
     .description(
       'Initial prompt for local transcription. The official adapter keeps the same knob ' +
-        '(`stt.local.initial_prompt`); without it the base model answers Mandarin in Traditional characters.',
+        '(`stt.local.initial_prompt`); without one the base model answers Mandarin in Traditional ' +
+        'characters, which is what this default prevents.',
     ),
 })
