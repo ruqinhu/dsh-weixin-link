@@ -7,14 +7,14 @@
 
 import type { MediaPayload } from './media.js'
 
-/** 入站 item 类型。只有 `1`（文本）带本插件直接读取的载荷。 */
+/** 入站 item 类型。官方 `weixin.py` 的 `ITEM_TEXT, ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO = 1,2,3,4,5`。 */
 export const ITEM_TYPE_TEXT = 1
-/** 图片。当前通道不读内容，只把它算作「收到了一条非文本消息」。 */
+/** 图片。 */
 export const ITEM_TYPE_IMAGE = 2
+/** 语音（官方为 3，文件为 4 —— 与直觉相反，按官方常量写）。 */
+export const ITEM_TYPE_VOICE = 3
 /** 文件。 */
-export const ITEM_TYPE_FILE = 3
-/** 语音。 */
-export const ITEM_TYPE_VOICE = 4
+export const ITEM_TYPE_FILE = 4
 /** 视频。 */
 export const ITEM_TYPE_VIDEO = 5
 
@@ -34,6 +34,8 @@ export interface ItemListEntry {
   file_item?: MediaPayload
   /** 语音载荷；同上。 */
   voice_item?: MediaPayload
+  /** 视频载荷；同上。 */
+  video_item?: MediaPayload
   /**
    * 其他 item 的字段名不在类型里。
    *
@@ -99,7 +101,7 @@ export function mediaItems(message: WeixinMessage): MediaItem[] {
   const out: MediaItem[] = []
   for (const item of message.item_list ?? []) {
     if (item.type === ITEM_TYPE_TEXT) continue
-    const payload = item.image_item ?? item.file_item ?? item.voice_item
+    const payload = item.image_item ?? item.file_item ?? item.voice_item ?? item.video_item
     out.push({
       type: item.type,
       keys: Object.keys(item).filter((key) => key !== 'type'),
@@ -112,9 +114,9 @@ export function mediaItems(message: WeixinMessage): MediaItem[] {
 
 const MEDIA_LABELS: Record<number, string> = {
   [ITEM_TYPE_IMAGE]: '张图片',
-  [ITEM_TYPE_FILE]: '个文件',
   [ITEM_TYPE_VOICE]: '条语音',
-  [ITEM_TYPE_VIDEO]: '个视频',
+  [ITEM_TYPE_FILE]: '个文件',
+  [ITEM_TYPE_VIDEO]: '段视频',
 }
 
 /** 人类可读的媒体摘要，例如 `2 张图片、1 个文件`。 */

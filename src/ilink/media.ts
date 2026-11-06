@@ -113,12 +113,68 @@ export function identifyMedia(bytes: Buffer): MediaSignature | undefined {
 /** Image-only alias kept for the call sites that predate files and voice. */
 export const identifyImage = identifyMedia
 
+/** Official iLink CDN base (`gateway/platforms/weixin.py: WEIXIN_CDN_BASE_URL`). */
+export const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
+
+/**
+ * Hosts the official adapter accepts for a `full_url` fetch.
+ *
+ * Copied from `_WEIXIN_CDN_ALLOWLIST`: a media URL arrives inside a message, so
+ * fetching it unchecked is an SSRF primitive. The CDN-base path is preferred and needs
+ * no allowlist because the host is ours; this covers the fallback only.
+ */
+const CDN_ALLOWLIST: ReadonlySet<string> = new Set([
+  'novac2c.cdn.weixin.qq.com',
+  'ilinkai.weixin.qq.com',
+  'wx.qlogo.cn',
+  'thirdwx.qlogo.cn',
+  'res.wx.qq.com',
+  'mmbiz.qpic.cn',
+  'mmbiz.qlogo.cn',
+])
+
+/**
+ * Resolve the download URL the way the official adapter does.
+ *
+ * `encrypt_query_param` wins when present: the official client turns it into
+ * `<cdn-base>/download?encrypted_query_param=…` and only falls back to `full_url` when
+ * there is no parameter. Treating `full_url` as the primary source and appending the
+ * parameter happened to return the same bytes here, but it depends on how a particular
+ * deployment populates the field.
+ */
+export function resolveMediaUrl(params: {
+  cdnBaseUrl?: string
+  encryptQueryParam?: string
+  fullUrl?: string
+}): string {
+  const base = (params.cdnBaseUrl ?? WEIXIN_CDN_BASE_URL).replace(/\/+$/, '')
+  if (params.encryptQueryParam !== undefined && params.encryptQueryParam !== '') {
+    return `${base}/download?encrypted_query_param=${encodeURIComponent(params.encryptQueryParam)}`
+  }
+  const fullUrl = params.fullUrl
+  if (fullUrl === undefined || fullUrl === '') {
+    throw new Error('media item has neither encrypt_query_param nor full_url')
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(fullUrl)
+  } catch {
+    throw new Error(`unparseable media URL: ${fullUrl.slice(0, 80)}`)
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`media URL has disallowed scheme ${parsed.protocol}`)
+  }
+  if (!CDN_ALLOWLIST.has(parsed.hostname)) {
+    throw new Error(`media URL host ${parsed.hostname} is not a WeChat CDN host`)
+  }
+  return fullUrl
+}
+
 /**
  * Join the CDN URL with its encrypted query parameter.
  *
- * The parameter arrives without a leading `?` on the messages observed, but the
- * separators differ between deployments, so every shape is handled rather than
- * assuming one and producing a 404 that looks like a decryption failure.
+ * Kept for the plain join it describes; the download path uses {@link resolveMediaUrl},
+ * which is what the official adapter does.
  */
 export function buildMediaUrl(fullUrl: string, queryParam?: string): string {
   if (queryParam === undefined || queryParam === '') return fullUrl
@@ -127,25 +183,35 @@ export function buildMediaUrl(fullUrl: string, queryParam?: string): string {
   return `${fullUrl}${separator}${queryParam}`
 }
 
-/** Every key encoding the protocol might use, most likely first. */
-function keyCandidates(aesKeyB64: string | undefined, aesKeyAlt: string | undefined): Buffer[] {
+/**
+ * Key candidates, mirroring the official `_parse_aes_key`.
+ *
+ * Three encodings exist and the official code distinguishes them by decoded length: a
+ * 16-byte base64 decode is the key itself; a 32-byte decode that is ASCII hex is a key
+ * stored hex-encoded; and `image_item.aeskey` carries the key as a *raw hex string*
+ * beside the media block. Treating that 32-byte hex-as-text case as an AES-256 key is
+ * the mistake this comment exists to prevent.
+ */
+function keyCandidates(aesKeyB64: string | undefined, rawAeskeyHex: string | undefined): Buffer[] {
   const out: Buffer[] = []
-  const seen = new Set<string>()
-  for (const raw of [aesKeyB64, aesKeyAlt]) {
-    if (raw === undefined || raw === '') continue
-    const value = raw.trim()
-    const push = (buffer: Buffer) => {
-      const key = buffer.toString('hex')
-      if ((buffer.length === 16 || buffer.length === 24 || buffer.length === 32) && !seen.has(key)) {
-        seen.add(key)
-        out.push(buffer)
-      }
-    }
-    // Base64 (standard and URL-safe) first: that is what the captured message carries.
-    push(Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64'))
-    if (/^[0-9a-f]+$/i.test(value) && value.length % 2 === 0) push(Buffer.from(value, 'hex'))
+  const push = (key: Buffer | undefined): void => {
+    if (key === undefined || key.length === 0) return
+    if (!out.some((existing) => existing.equals(key))) out.push(key)
   }
-  return out
+  const hex = (value: string): Buffer | undefined =>
+    /^[0-9a-f]+$/i.test(value) && value.length % 2 === 0 ? Buffer.from(value, 'hex') : undefined
+
+  // The raw hex form the image envelope carries beside `media`.
+  if (rawAeskeyHex !== undefined && rawAeskeyHex.trim() !== '') push(hex(rawAeskeyHex.trim()))
+
+  if (aesKeyB64 !== undefined && aesKeyB64.trim() !== '') {
+    const value = aesKeyB64.trim()
+    push(hex(value))
+    const decoded = Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+    if (decoded.length === 16) push(decoded)
+    else if (decoded.length === 32) push(hex(decoded.toString('ascii')) ?? decoded)
+  }
+  return out.filter((key) => key.length === 16 || key.length === 24 || key.length === 32)
 }
 
 /**
@@ -186,13 +252,20 @@ interface DecryptionMode {
 /**
  * The schemes worth trying, most likely first.
  *
- * WeCom-family CDNs document AES-CBC with the IV taken from the key, but the payload
- * that failed on 2026-11-06 decoded with none of the obvious variants — so the
- * remaining plausible shapes (zero IV, ECB, an IV prepended to the ciphertext) are
- * tried too, and the winning one is reported. Guessing a single scheme is how a future
- * deployment silently breaks.
+ * ECB is first because that is what the official adapter uses
+ * (`_aes128_ecb_decrypt` in `gateway/platforms/weixin.py`) and what the first real
+ * payload decoded with. The CBC variants stay as a fallback for deployments that
+ * encrypt differently — guessing a single scheme is how a future channel silently
+ * breaks.
  */
 const DECRYPTION_MODES: readonly DecryptionMode[] = [
+  {
+    name: 'ecb',
+    decrypt: (p, k) => {
+      const decipher = createDecipheriv(`aes-${k.length * 8}-ecb`, k, null)
+      return Buffer.concat([decipher.update(p), decipher.final()])
+    },
+  },
   { name: 'cbc-iv-from-key', decrypt: (p, k) => aesCbc(p, k, k.subarray(0, 16)) },
   { name: 'cbc-zero-iv', decrypt: (p, k) => aesCbc(p, k, Buffer.alloc(16)) },
   {
@@ -200,13 +273,6 @@ const DECRYPTION_MODES: readonly DecryptionMode[] = [
     decrypt: (p, k) => {
       if (p.length <= 32) throw new Error('payload too short for a prepended IV')
       return aesCbc(p.subarray(16), k, p.subarray(0, 16))
-    },
-  },
-  {
-    name: 'ecb',
-    decrypt: (p, k) => {
-      const decipher = createDecipheriv(`aes-${k.length * 8}-ecb`, k, null)
-      return Buffer.concat([decipher.update(p), decipher.final()])
     },
   },
 ]
@@ -277,8 +343,10 @@ export function decodeMediaPayload(
 }
 
 export interface DownloadOptions {
-  /** What the caller can use: `image` for a picture, `any` for files and voice. */
+  /** What the caller can use: `image` for a picture, `any` for files, voice and video. */
   kind?: 'image' | 'any'
+  /** Overrides the official CDN base; the encrypted query parameter is appended to it. */
+  cdnBaseUrl?: string
   timeoutMs?: number
   /** Injected for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch
@@ -292,10 +360,13 @@ export interface DownloadOptions {
  * message".
  */
 export async function downloadMedia(item: MediaPayload, options: DownloadOptions = {}): Promise<DecodedMedia> {
-  const fullUrl = item.media?.full_url
-  if (fullUrl === undefined || fullUrl === '') throw new Error('media item has no full_url')
-
-  const url = buildMediaUrl(fullUrl, item.media?.encrypt_query_param)
+  const url = resolveMediaUrl({
+    ...(options.cdnBaseUrl === undefined ? {} : { cdnBaseUrl: options.cdnBaseUrl }),
+    ...(item.media?.encrypt_query_param === undefined
+      ? {}
+      : { encryptQueryParam: item.media.encrypt_query_param }),
+    ...(item.media?.full_url === undefined ? {} : { fullUrl: item.media.full_url }),
+  })
   const doFetch = options.fetchImpl ?? fetch
   const response = await doFetch(url, {
     signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_MEDIA_TIMEOUT_MS),

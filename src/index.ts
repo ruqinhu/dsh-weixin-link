@@ -40,9 +40,21 @@ const POLL_RETRY_MS = 5_000
 /** Whether a message carries anything that needs a download before it can be read. */
 function hasMedia(message: InboundText): boolean {
   return (
-    (message.images?.length ?? 0) + (message.files?.length ?? 0) + (message.voices?.length ?? 0) > 0
+    (message.images?.length ?? 0) +
+      (message.files?.length ?? 0) +
+      (message.voices?.length ?? 0) +
+      (message.videos?.length ?? 0) >
+    0
   )
 }
+
+/**
+ * Per-kind download budgets, from the official adapter's `_INBOUND_MEDIA`.
+ *
+ * They differ by an order of magnitude because the payloads do: a JPEG is a few
+ * hundred kilobytes, a video is tens of megabytes on a slow link.
+ */
+const MEDIA_TIMEOUT_MS = { image: 30_000, file: 60_000, voice: 60_000, video: 120_000 } as const
 
 export function expandTilde(path: string): string {
   if (path === '~') return homedir()
@@ -257,18 +269,25 @@ export default class WeixinLink extends Service {
     const images = message.images ?? []
     const files = message.files ?? []
     const voices = message.voices ?? []
-    if (images.length + files.length + voices.length === 0) return message
+    const videos = message.videos ?? []
+    if (images.length + files.length + voices.length + videos.length === 0) return message
 
     const savedImages: string[] = []
     const savedFiles: string[] = []
     const savedVoices: string[] = []
+    const savedVideos: string[] = []
     const failures: string[] = []
     const modes: string[] = []
     const transcripts: string[] = []
     let decode: { status: number; contentType?: string; prefix: string } | undefined
 
-    const store = async (payload: MediaPayload, kind: 'image' | 'any', tag: string): Promise<string> => {
-      const decoded = await downloadMedia(payload, { kind })
+    const store = async (
+      payload: MediaPayload,
+      kind: 'image' | 'any',
+      tag: string,
+      timeoutMs: number,
+    ): Promise<string> => {
+      const decoded = await downloadMedia(payload, { kind, timeoutMs })
       const directory = join(this.dataDir, 'inbox')
       await mkdir(directory, { recursive: true })
       const target = join(directory, `${message.messageId ?? Date.now()}-${tag}.${decoded.extension}`)
@@ -299,14 +318,14 @@ export default class WeixinLink extends Service {
 
     for (const [index, image] of images.entries()) {
       try {
-        savedImages.push(await store(image, 'image', `img${index}`))
+        savedImages.push(await store(image, 'image', `img${index}`, MEDIA_TIMEOUT_MS.image))
       } catch (error) {
         fail(error, `img${index}`)
       }
     }
     for (const [index, file] of files.entries()) {
       try {
-        savedFiles.push(await store(file, 'any', `file${index}`))
+        savedFiles.push(await store(file, 'any', `file${index}`, MEDIA_TIMEOUT_MS.file))
       } catch (error) {
         fail(error, `file${index}`)
       }
@@ -314,7 +333,7 @@ export default class WeixinLink extends Service {
     for (const [index, voice] of voices.entries()) {
       let target: string
       try {
-        target = await store(voice, 'any', `voice${index}`)
+        target = await store(voice, 'any', `voice${index}`, MEDIA_TIMEOUT_MS.voice)
         savedVoices.push(target)
       } catch (error) {
         fail(error, `voice${index}`)
@@ -332,9 +351,16 @@ export default class WeixinLink extends Service {
         failures.push(`stt: ${(error as Error).message}`)
       }
     }
+    for (const [index, video] of videos.entries()) {
+      try {
+        savedVideos.push(await store(video, 'any', `video${index}`, MEDIA_TIMEOUT_MS.video))
+      } catch (error) {
+        fail(error, `video${index}`)
+      }
+    }
 
     this.appendInboundMedia(message, at, {
-      saved: savedImages.length + savedFiles.length + savedVoices.length,
+      saved: savedImages.length + savedFiles.length + savedVoices.length + savedVideos.length,
       failures,
       ...(modes.length === 0 ? {} : { modes }),
       ...(transcripts.length === 0 ? {} : { transcripts: transcripts.length }),
@@ -348,6 +374,9 @@ export default class WeixinLink extends Service {
     }
     if (savedFiles.length > 0) {
       notes.push(`（收到 ${savedFiles.length} 个文件，已保存到 ${savedFiles.join('、')}；请用 read 或 bash 查看。）`)
+    }
+    if (savedVideos.length > 0) {
+      notes.push(`（收到 ${savedVideos.length} 段视频，已保存到 ${savedVideos.join('、')}；如需分析可用 bash 取帧。）`)
     }
     if (savedVoices.length > 0 && transcripts.length === 0) {
       notes.push(`（收到 ${savedVoices.length} 条语音，已保存到 ${savedVoices.join('、')}，但转写失败；请让用户改用文字。）`)

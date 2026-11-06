@@ -8,6 +8,7 @@ import {
   MAX_MEDIA_BYTES,
   payloadPrefix,
   ImageDecodeError,
+  resolveMediaUrl,
 } from '../src/ilink/media.js'
 import { silkToWavArgs } from '../src/ilink/voice.js'
 
@@ -63,6 +64,32 @@ describe('decodeMediaPayload', () => {
     expect(decoded.bytes.equals(SILK)).toBe(true)
   })
 
+  it('decrypts with the scheme the official adapter uses (AES-128-ECB)', () => {
+    const key = randomBytes(16)
+    const cipher = createCipheriv('aes-128-ecb', key, null)
+    const payload = Buffer.concat([cipher.update(JPEG), cipher.final()])
+
+    const decoded = decodeMediaPayload(payload, item(key.toString('base64')), 'any')
+
+    expect(decoded.mode).toBe('ecb')
+    expect(decoded.mime).toBe('image/jpeg')
+    expect(decoded.bytes.equals(JPEG)).toBe(true)
+  })
+
+  it('accepts a key stored as base64 of 32 hex characters', () => {
+    // The official `_parse_aes_key` decodes 32 bytes that spell hex into the 16-byte
+    // key; treating those 32 bytes as an AES-256 key is the bug this pins down.
+    const key = randomBytes(16)
+    const asHexText = Buffer.from(key.toString('hex'), 'ascii').toString('base64')
+    const cipher = createCipheriv('aes-128-ecb', key, null)
+    const payload = Buffer.concat([cipher.update(PNG), cipher.final()])
+
+    const decoded = decodeMediaPayload(payload, item(asHexText), 'any')
+
+    expect(decoded.mode).toBe('ecb')
+    expect(decoded.mime).toBe('image/png')
+  })
+
   it('still demands an image signature when the caller expects one', () => {
     // A file saved as a JPEG that is not a JPEG is worse than a reported failure.
     expect(() => decodeMediaPayload(SILK, item(), 'image')).toThrow(/not an image/)
@@ -85,7 +112,7 @@ describe('decodeMediaPayload', () => {
 
     try {
       await downloadMedia(
-        { media: { full_url: 'https://cdn/x', aes_key: wrong.toString('base64') } },
+        { media: { full_url: 'https://novac2c.cdn.weixin.qq.com/c2c/x', aes_key: wrong.toString('base64') } },
         { kind: 'any', fetchImpl },
       )
       expect.unreachable()
@@ -106,7 +133,7 @@ describe('downloadMedia', () => {
       new Response(payload, { status: 200, headers: { 'content-length': String(payload.length) } })) as unknown as typeof fetch
 
     const decoded = await downloadMedia(
-      { media: { full_url: 'https://cdn/v', encrypt_query_param: 'k=v', aes_key: key.toString('base64') } },
+      { media: { full_url: 'https://novac2c.cdn.weixin.qq.com/c2c/v', encrypt_query_param: 'k=v', aes_key: key.toString('base64') } },
       { kind: 'any', fetchImpl },
     )
 
@@ -119,7 +146,7 @@ describe('downloadMedia', () => {
     const fetchImpl = (async () => new Response('nope', { status: 403 })) as unknown as typeof fetch
 
     await expect(
-      downloadMedia({ media: { full_url: 'https://cdn/x' } }, { kind: 'any', fetchImpl }),
+      downloadMedia({ media: { full_url: 'https://novac2c.cdn.weixin.qq.com/c2c/x' } }, { kind: 'any', fetchImpl }),
     ).rejects.toThrow(/HTTP 403/)
   })
 
@@ -131,21 +158,38 @@ describe('downloadMedia', () => {
       })) as unknown as typeof fetch
 
     await expect(
-      downloadMedia({ media: { full_url: 'https://cdn/x' } }, { kind: 'any', fetchImpl }),
+      downloadMedia({ media: { full_url: 'https://novac2c.cdn.weixin.qq.com/c2c/x' } }, { kind: 'any', fetchImpl }),
     ).rejects.toThrow(/too large/)
   })
 
   it('needs a URL at all', async () => {
-    await expect(downloadMedia({}, { kind: 'any' })).rejects.toThrow(/no full_url/)
+    await expect(downloadMedia({}, { kind: 'any' })).rejects.toThrow(/neither encrypt_query_param nor full_url/)
+  })
+})
+
+describe('resolveMediaUrl', () => {
+  it('prefers the CDN base and the encrypted query parameter, as the official adapter does', () => {
+    expect(
+      resolveMediaUrl({ encryptQueryParam: 'abc=1/2', fullUrl: 'https://example.com/x' }),
+    ).toBe('https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=abc%3D1%2F2')
+  })
+
+  it('falls back to full_url only for a WeChat CDN host', () => {
+    expect(resolveMediaUrl({ fullUrl: 'https://novac2c.cdn.weixin.qq.com/c2c/x' })).toBe(
+      'https://novac2c.cdn.weixin.qq.com/c2c/x',
+    )
+    // A media URL arrives inside a message; fetching it unchecked is an SSRF primitive.
+    expect(() => resolveMediaUrl({ fullUrl: 'https://evil.example/x' })).toThrow(/not a WeChat CDN host/)
+    expect(() => resolveMediaUrl({ fullUrl: 'file:///etc/passwd' })).toThrow(/disallowed scheme/)
   })
 })
 
 describe('buildMediaUrl', () => {
   it('appends the encrypted query parameter with the right separator', () => {
-    expect(buildMediaUrl('https://cdn/x', 'a=1')).toBe('https://cdn/x?a=1')
-    expect(buildMediaUrl('https://cdn/x?z=0', 'a=1')).toBe('https://cdn/x?z=0&a=1')
-    expect(buildMediaUrl('https://cdn/x', '?a=1')).toBe('https://cdn/x?a=1')
-    expect(buildMediaUrl('https://cdn/x', '')).toBe('https://cdn/x')
+    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', 'a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?a=1')
+    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x?z=0', 'a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?z=0&a=1')
+    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', '?a=1')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x?a=1')
+    expect(buildMediaUrl('https://novac2c.cdn.weixin.qq.com/c2c/x', '')).toBe('https://novac2c.cdn.weixin.qq.com/c2c/x')
   })
 })
 

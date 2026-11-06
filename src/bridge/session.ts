@@ -6,6 +6,7 @@ import {
   describeMedia,
   ITEM_TYPE_FILE,
   ITEM_TYPE_IMAGE,
+  ITEM_TYPE_VIDEO,
   ITEM_TYPE_VOICE,
   mediaItems,
   messageText,
@@ -39,6 +40,8 @@ export interface InboundText {
   files?: readonly MediaPayload[]
   /** 语音载荷；下载后转写。 */
   voices?: readonly MediaPayload[]
+  /** 视频载荷；下载后落盘并给出路径。 */
+  videos?: readonly MediaPayload[]
 }
 
 /**
@@ -85,6 +88,7 @@ export function toInboundText(
   const images = pick(ITEM_TYPE_IMAGE)
   const files = pick(ITEM_TYPE_FILE)
   const voices = pick(ITEM_TYPE_VOICE)
+  const videos = pick(ITEM_TYPE_VIDEO)
 
   return {
     userId,
@@ -96,6 +100,7 @@ export function toInboundText(
     ...(images.length === 0 ? {} : { images }),
     ...(files.length === 0 ? {} : { files }),
     ...(voices.length === 0 ? {} : { voices }),
+    ...(videos.length === 0 ? {} : { videos }),
   }
 }
 

@@ -80,6 +80,22 @@ describe('toInboundText', () => {
     expect(shape).not.toContain('k3y')
   })
 
+  it('routes item types the way the official adapter numbers them', () => {
+    // Official: ITEM_TEXT, ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO = 1,2,3,4,5.
+    // Guessing the other order is how a voice note gets treated as a document.
+    const voice = toInboundText(message({ item_list: [{ type: 3, voice_item: { media: { full_url: 'u' } } }] }), {
+      echoOwnMessages: false,
+    })
+    const file = toInboundText(message({ item_list: [{ type: 4, file_item: { media: { full_url: 'u' } } }] }), {
+      echoOwnMessages: false,
+    })
+
+    expect(voice?.voices).toHaveLength(1)
+    expect(voice?.files).toBeUndefined()
+    expect(file?.files).toHaveLength(1)
+    expect(file?.voices).toBeUndefined()
+  })
+
   it('mentions media that arrived beside text without replacing the text', () => {
     const inbound = toInboundText(
       message({
@@ -101,7 +117,7 @@ describe('toInboundText', () => {
         item_list: [
           { type: 2, image_item: { url: 'https://secret/cdn?key=1' } },
           { type: 2, image_item: { url: 'https://secret/cdn?key=2' } },
-          { type: 3, file_item: { url: 'https://secret/f' } },
+          { type: 4, file_item: { url: 'https://secret/f' } },
         ],
       }),
       { echoOwnMessages: false },

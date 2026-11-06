@@ -6,14 +6,16 @@ faster-whisper cannot read, so the audio is converted to 24 kHz mono WAV with `p
 first — the same path the inherited Hermes gateway used.
 
 Configuration through the environment (all optional):
-  DSH_STT_MODEL     faster-whisper model name (default: base)
-  DSH_STT_LANGUAGE  spoken language (default: zh)
-  DSH_STT_PROMPT    initial prompt (default: simplified-Chinese hint)
+  DSH_STT_MODEL      faster-whisper model name (default: base)
+  DSH_STT_LANGUAGE   spoken language (default: zh for this deployment)
+  DSH_STT_PROMPT     initial prompt; unset by default, as in the official adapter
+  DSH_STT_VAD        "0" disables VAD (default: on)
 
-The default model is `base` on purpose: this box has ~1.9 GB of memory shared with the
-harness, and `small` was measured to starve the gateway. `int8` keeps the footprint
-small; beam_size=5 and vad_filter=False are the settings the Hermes skill found
-necessary for Mandarin (VAD was cutting short sentences into fragments).
+The transcription kwargs mirror the official `tools/transcription_local.py`
+(`build_local_transcribe_kwargs`): beam_size 5, condition_on_previous_text False,
+VAD on by default with a 500 ms minimum silence, and the confidence gates pushed into
+faster-whisper itself so low-confidence non-English segments are not dropped before
+our post-filter sees them. The default model is `base` (`DEFAULT_LOCAL_MODEL`).
 """
 
 from __future__ import annotations
@@ -23,6 +25,11 @@ import sys
 import tempfile
 
 SILK_SUFFIXES = (".silk", ".slk")
+
+# Defaults from the official adapter.
+VAD_MIN_SILENCE_MS = 500
+NO_SPEECH_THRESHOLD = 0.6
+LOG_PROB_THRESHOLD = -1.0
 
 
 def die(message: str, code: int = 1) -> int:
@@ -60,17 +67,25 @@ def main() -> int:
 
     model_name = os.environ.get("DSH_STT_MODEL", "base")
     language = os.environ.get("DSH_STT_LANGUAGE", "zh")
-    prompt = os.environ.get("DSH_STT_PROMPT", "以下是简体中文普通话的对话内容。")
+    prompt = os.environ.get("DSH_STT_PROMPT", "").strip()
+    vad_enabled = os.environ.get("DSH_STT_VAD", "1") not in {"0", "false", "False", ""}
+
+    kwargs = {
+        "language": language,
+        "beam_size": 5,
+        "condition_on_previous_text": False,
+        "vad_filter": vad_enabled,
+        "no_speech_threshold": NO_SPEECH_THRESHOLD,
+        "log_prob_threshold": LOG_PROB_THRESHOLD,
+    }
+    if vad_enabled:
+        kwargs["vad_parameters"] = {"min_silence_duration_ms": VAD_MIN_SILENCE_MS}
+    if prompt:
+        kwargs["initial_prompt"] = prompt
 
     try:
         model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        segments, _info = model.transcribe(
-            wav,
-            language=language,
-            vad_filter=False,
-            beam_size=5,
-            initial_prompt=prompt,
-        )
+        segments, _info = model.transcribe(wav, **kwargs)
         text = "".join(segment.text for segment in segments).strip()
     except Exception as error:  # noqa: BLE001
         return die(f"transcription failed: {error}")
