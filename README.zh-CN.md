@@ -164,3 +164,13 @@ watchdog-restart reason=stalled lagMs=142000 failures=0
 ## 许可
 
 [MIT](LICENSE)
+
+## 10. 发版
+
+每次版本号变化都必须打 Release，只有 tag 不够。0.4.3–0.6.4 就是这么丢的：服务器上跑的是本地 tgz，GitHub 上根本没有对应产物。
+
+```bash
+node scripts/release.mjs --name "vX.Y.Z - 摘要" --notes notes.md
+```
+
+脚本会：tgz 缺失时自动 build+pack → 建 tag 与 release → 上传 `.tgz` → 推送 tag。同名 release 已存在时只补资产，不重复创建。token 优先取 `GH_TOKEN` / `GITHUB_TOKEN`，否则读 `~/.git-credentials` 里的 github.com 条目（`credential.helper=store`）。

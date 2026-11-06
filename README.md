@@ -168,3 +168,13 @@ service rather than returning `undefined`, and a `try/catch` turns that into
 ## License
 
 [MIT](LICENSE)
+
+## 10. Release
+
+Every version bump must produce a release; the tag alone is not enough. 0.4.3–0.6.4 shipped without one, so the server ran tarballs that GitHub never had.
+
+```bash
+node scripts/release.mjs --name "vX.Y.Z - summary" --notes notes.md
+```
+
+The script builds and packs when the tarball is missing, creates the tag and release, uploads the `.tgz`, and pushes the tag. An existing release of the same tag gets the asset attached instead of a second release. It reads `GH_TOKEN` / `GITHUB_TOKEN`, falling back to the `github.com` entry in `~/.git-credentials` (`credential.helper=store`).

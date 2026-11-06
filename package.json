@@ -44,7 +44,8 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "release": "node scripts/release.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
