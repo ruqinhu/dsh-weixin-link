@@ -9,6 +9,7 @@ import { Config } from './config.js'
 import { IlinkClient } from './ilink/client.js'
 import { sendText } from './ilink/send.js'
 import { pollUpdates } from './ilink/updates.js'
+import type { WeixinMessage } from './ilink/types.js'
 import { pushWithRetry, type PushOutcome, type PushTarget } from './delivery/push.js'
 import { DeliveryDedupe } from './delivery/dedupe.js'
 import { AutoDeliver } from './deliver/auto-deliver.js'
@@ -399,6 +400,7 @@ export default class WeixinLink extends Service {
             await transcribeVoice(target, {
               command: this.config.sttCommand.trim() === '' ? undefined : this.config.sttCommand,
               timeoutMs: this.config.sttTimeoutMs,
+              ...(this.config.sttPrompt.trim() === '' ? {} : { prompt: this.config.sttPrompt }),
             }),
           )
         } catch (error) {
@@ -432,6 +434,30 @@ export default class WeixinLink extends Service {
 
     const note = notes.join('\n\n')
     return { ...message, text: message.rawText === '' ? note : `${message.rawText}\n\n${note}` }
+  }
+
+  /**
+   * Record one raw wire message's shape.
+   *
+   * Types and field names only — never text, URLs or keys. This exists to answer a
+   * question the aggregate counters cannot: did the file the owner says they sent ever
+   * reach `getupdates` at all?
+   */
+  private appendInboundDebug(message: WeixinMessage): void {
+    const record = {
+      at: new Date().toISOString(),
+      messageId: message.message_id,
+      messageType: message.message_type,
+      items: (message.item_list ?? []).map((item) => ({
+        type: item.type,
+        keys: Object.keys(item).filter((key) => key !== 'type'),
+      })),
+    }
+    try {
+      appendFileSync(join(this.dataDir, 'inbound-debug.log'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    } catch {
+      // Diagnostics are best-effort by design.
+    }
   }
 
   /**
@@ -656,6 +682,10 @@ export default class WeixinLink extends Service {
         const inbound = collectInbound(round.messages, {
           echoOwnMessages: this.config.echoOwnMessages,
         })
+        // Every wire message, before any filtering. Files were reported as "sent" three
+        // times and produced zero records, so the open question is whether iLink to
+        // this bot carries them at all — and only the raw item types can answer that.
+        for (const wire of round.messages) this.appendInboundDebug(wire)
         if (inbound.length === 0) continue
 
         // Record every token before replay so a single batch can both refresh the

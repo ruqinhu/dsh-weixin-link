@@ -63,6 +63,8 @@ export interface Config {
   sttCommand: string
   /** 单条语音转写的超时。模型加载要几秒，给得比一次网络请求宽。 */
   sttTimeoutMs: number
+  /** 本地转写的初始提示；留空则用模型默认（base 会输出繁体）。 */
+  sttPrompt: string
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -133,4 +135,10 @@ export const Config: Schema<Config> = Schema.object({
   sttTimeoutMs: Schema.number()
     .default(90_000)
     .description('Give up on one transcription after this long; the message then carries the saved path.'),
+  sttPrompt: Schema.string()
+    .default('')
+    .description(
+      'Initial prompt for local transcription. The official adapter keeps the same knob ' +
+        '(`stt.local.initial_prompt`); without it the base model answers Mandarin in Traditional characters.',
+    ),
 })

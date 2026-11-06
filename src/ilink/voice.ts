@@ -21,6 +21,14 @@ export interface SttOptions {
   timeoutMs?: number
   /** Interpreter for the bundled helper. Defaults to `python3`. */
   python?: string
+  /**
+   * Initial prompt for the model.
+   *
+   * The official adapter carries `stt.local.initial_prompt` for the same reason:
+   * without one, `base` answers Mandarin in Traditional characters (observed as
+   * 「您好,您是什麼模型?」), which is not what this owner reads.
+   */
+  prompt?: string
 }
 
 export interface SilkArgs {
@@ -89,6 +97,9 @@ export async function transcribeVoice(file: string, options: SttOptions = {}): P
         HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE ?? '1',
         TRANSFORMERS_OFFLINE: process.env.TRANSFORMERS_OFFLINE ?? '1',
         OMP_NUM_THREADS: process.env.OMP_NUM_THREADS ?? '2',
+        ...(options.prompt === undefined || options.prompt.trim() === ''
+          ? {}
+          : { DSH_STT_PROMPT: options.prompt }),
       },
     })
     let stdout = ''
